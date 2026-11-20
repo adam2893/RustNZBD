@@ -24,12 +24,16 @@ tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
-tray-icon = "0.26"
-tao = "0.37"
+tray-icon = { version = "0.26", optional = true }
+tao = { version = "0.37", optional = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 parking_lot = { workspace = true }
 anyhow = { workspace = true }
+
+[features]
+default = ["tray"]
+tray = ["dep:tray-icon", "dep:tao"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

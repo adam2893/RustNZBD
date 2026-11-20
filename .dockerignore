@@ -1,0 +1,6 @@
+target/
+sabnzbd-upstream/
+downloads/
+.git/
+*.log
+.DS_Store

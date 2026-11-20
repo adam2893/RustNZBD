@@ -46,12 +46,12 @@ fn main() -> Result<()> {
         .unwrap_or_else(|_| PathBuf::from("rustnzbd_state.json"));
 
     let loaded_cfg = Config::load_or_create(&config_path)?;
-    let use_tray = loaded_cfg.enable_tray || args.iter().any(|a| a == "--tray");
-    let port = loaded_cfg.http_port;
     let queue = Arc::new(DownloadQueue::new_persistent(state_path));
     let shutdown_notify = Arc::new(Notify::new());
 
-    if use_tray {
+    #[cfg(feature = "tray")]
+    if loaded_cfg.enable_tray || args.iter().any(|a| a == "--tray") {
+        let port = loaded_cfg.http_port;
         let q_bg = queue.clone();
         let sd_bg = shutdown_notify.clone();
         let cfg_path_bg = config_path.clone();
@@ -62,13 +62,15 @@ fn main() -> Result<()> {
             }
         });
         run_tray_loop(port, queue, shutdown_notify)?;
-    } else {
-        let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(run_server(loaded_cfg, config_path, queue, shutdown_notify))?;
+        return Ok(());
     }
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(run_server(loaded_cfg, config_path, queue, shutdown_notify))?;
     Ok(())
 }
 
+#[cfg(feature = "tray")]
 fn run_tray_loop(
     port: u16,
     queue: Arc<DownloadQueue>,
@@ -133,6 +135,7 @@ fn run_tray_loop(
     });
 }
 
+#[cfg(feature = "tray")]
 fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(url).spawn();
