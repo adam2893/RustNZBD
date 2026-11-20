@@ -30,6 +30,24 @@ Measured side-by-side on macOS against [adam2893/sabnzbd](https://github.com/ada
 - **`sabnzbd-api`**: Axum HTTP/HTTPS server implementing SABnzbd `/api` endpoints (`version`, `queue`, `history`, `addfile`, `addurl`, `addlocalfile`, `get_files`, `get_cats`, `change_cat`, `pause`, `resume`, `server_stats`, `config`, `get_config`, `save_settings`, `add_server`, `delete_server`, `get_lang`, `warnings`, `auth`, `shutdown`, `output=xml`) and embedded Web UI at `/`.
 - **`sabnzbd-cli`**: `rustnzbd` binary with concurrent segment workers, Direct Unpack, speed-limit throttling, watched `.nzb` directory scanner, optional HTTPS listener, `--import-ini`, `--tray` desktop menu (`tray-icon` + `tao`), and graceful shutdown.
 
+## Docker (Unraid / Linux / macOS)
+
+Multi-arch (`linux/amd64`, `linux/arm64`) Alpine image published to GitHub Container Registry:
+
+```sh
+docker pull ghcr.io/adam2893/rustnzbd:latest
+
+docker run -d \
+  --name rustnzbd \
+  -p 8080:8080 \
+  -v /path/to/config:/config \
+  -v /path/to/downloads:/downloads \
+  --restart unless-stopped \
+  ghcr.io/adam2893/rustnzbd:latest
+```
+
+On Unraid, set **Repository** to `ghcr.io/adam2893/rustnzbd:latest`, map `/config` and `/downloads`, and expose port `8080`.
+
 ## Quick Start
 
 ```sh
