@@ -53,8 +53,10 @@ pub fn create_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn index_handler() -> Html<&'static str> {
-    Html(include_str!("ui.html"))
+async fn index_handler(State(state): State<AppState>) -> Html<String> {
+    let api_key = state.config.read().api_key.clone();
+    let html = include_str!("ui.html").replace("__RUSTNZBD_API_KEY__", &api_key);
+    Html(html)
 }
 
 fn check_auth(state: &AppState, mode: &str, apikey: &Option<String>) -> Option<Response> {
