@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" width="120" alt="RustNZBD Logo" />
+</p>
+
 # RustNZBD
 
 High-performance Usenet (NZB) downloader written in Rust — a single-binary, drop-in SABnzbd replacement compatible with Sonarr, Radarr, Lidarr, Readarr, Prowlarr, and NZB360.

@@ -1,0 +1,102 @@
+name: Release Binaries (AppImage, EXE, DMG)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux-appimage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build & AppImage tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librsvg2-bin file libfuse2
+          curl -sSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+      - name: Build release binary (headless)
+        run: cargo build --release --package sabnzbd-cli --no-default-features
+      - name: Package AppImage
+        run: |
+          mkdir -p AppDir/usr/bin
+          cp target/release/rustnzbd AppDir/usr/bin/rustnzbd
+          rsvg-convert -w 256 -h 256 assets/logo.svg -o AppDir/rustnzbd.png
+          printf '%s\n' '[Desktop Entry]' 'Name=RustNZBD' 'Exec=rustnzbd' 'Icon=rustnzbd' 'Type=Application' 'Categories=Network;FileTransfer;' 'Terminal=true' > AppDir/rustnzbd.desktop
+          printf '%s\n' '#!/bin/sh' 'HERE="$(dirname "$(readlink -f "$0")")"' 'exec "$HERE/usr/bin/rustnzbd" "$@"' > AppDir/AppRun
+          chmod +x AppDir/AppRun
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir RustNZBD-linux-x86_64.AppImage
+          cp target/release/rustnzbd rustnzbd-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifacts
+          path: |
+            RustNZBD-linux-x86_64.AppImage
+            rustnzbd-linux-x86_64
+
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Windows binary
+        run: cargo build --release --package sabnzbd-cli
+      - name: Rename binary
+        shell: bash
+        run: cp target/release/rustnzbd.exe rustnzbd-windows-x86_64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: rustnzbd-windows-x86_64.exe
+
+  macos-dmg:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build macOS binary
+        run: cargo build --release --package sabnzbd-cli
+      - name: Create .app and .dmg
+        run: |
+          APP="RustNZBD.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp target/release/rustnzbd "$APP/Contents/MacOS/rustnzbd"
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+            '<plist version="1.0"><dict>' \
+            '  <key>CFBundleExecutable</key><string>rustnzbd</string>' \
+            '  <key>CFBundleIdentifier</key><string>com.adam2893.rustnzbd</string>' \
+            '  <key>CFBundleName</key><string>RustNZBD</string>' \
+            '  <key>CFBundlePackageType</key><string>APPL</string>' \
+            '  <key>CFBundleShortVersionString</key><string>1.0.0</string>' \
+            '  <key>LSUIElement</key><true/>' \
+            '</dict></plist>' > "$APP/Contents/Info.plist"
+          mkdir -p dmg_stage
+          cp -R "$APP" dmg_stage/
+          ln -s /Applications dmg_stage/Applications
+          hdiutil create -volname "RustNZBD" -srcfolder dmg_stage -ov -format UDZO RustNZBD-macos.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifacts
+          path: RustNZBD-macos.dmg
+
+  publish-release:
+    needs: [linux-appimage, windows-exe, macos-dmg]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*

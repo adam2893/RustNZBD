@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="#0f172a" stroke="#334155" stroke-width="8"/>
+  <!-- Geometric Usenet / binary segment bars -->
+  <rect x="64" y="56" width="128" height="16" rx="4" fill="#334155"/>
+  <rect x="64" y="56" width="84" height="16" rx="4" fill="#f97316"/>
+  <rect x="64" y="82" width="128" height="16" rx="4" fill="#334155"/>
+  <rect x="64" y="82" width="128" height="16" rx="4" fill="#38bdf8"/>
+  <!-- Bold downward download arrow -->
+  <path d="M112 112 h32 v44 h28 l-44 48 l-44 -48 h28 z" fill="#f8fafc"/>
+  <!-- Precision base tray -->
+  <path d="M56 184 v20 a8 8 0 0 0 8 8 h128 a8 8 0 0 0 8 -8 v-20 h-16 v12 h-112 v-12 z" fill="#f97316"/>
+</svg>
