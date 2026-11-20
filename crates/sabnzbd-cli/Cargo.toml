@@ -1,0 +1,22 @@
+[package]
+name = "sabnzbd-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rustnzbd"
+path = "src/main.rs"
+
+[dependencies]
+sabnzbd-core = { path = "../sabnzbd-core" }
+sabnzbd-api = { path = "../sabnzbd-api" }
+sabnzbd-nzb = { path = "../sabnzbd-nzb" }
+sabnzbd-nntp = { path = "../sabnzbd-nntp" }
+sabnzbd-decode = { path = "../sabnzbd-decode" }
+sabnzbd-postproc = { path = "../sabnzbd-postproc" }
+axum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+parking_lot = { workspace = true }
+anyhow = { workspace = true }

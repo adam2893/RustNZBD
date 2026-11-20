@@ -1,0 +1,12 @@
+[package]
+name = "sabnzbd-decode"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sabnzbd-core = { path = "../sabnzbd-core" }
+bytes = { workspace = true }
+crc32fast = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }

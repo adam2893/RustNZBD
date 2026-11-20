@@ -1,0 +1,10 @@
+[package]
+name = "sabnzbd-postproc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sabnzbd-core = { path = "../sabnzbd-core" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

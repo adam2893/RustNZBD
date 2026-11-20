@@ -1,0 +1,4 @@
+target/
+downloads/
+sabnzbd-upstream/
+*.log

@@ -1,0 +1,12 @@
+[package]
+name = "sabnzbd-nntp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sabnzbd-core = { path = "../sabnzbd-core" }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
