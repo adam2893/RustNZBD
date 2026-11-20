@@ -14,8 +14,11 @@ sabnzbd-nzb = { path = "../sabnzbd-nzb" }
 sabnzbd-nntp = { path = "../sabnzbd-nntp" }
 sabnzbd-decode = { path = "../sabnzbd-decode" }
 sabnzbd-postproc = { path = "../sabnzbd-postproc" }
+sabnzbd-services = { path = "../sabnzbd-services" }
 axum = { workspace = true }
 bytes = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

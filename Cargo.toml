@@ -6,6 +6,7 @@ members = [
     "crates/sabnzbd-decode",
     "crates/sabnzbd-postproc",
     "crates/sabnzbd-api",
+    "crates/sabnzbd-services",
     "crates/sabnzbd-cli",
 ]
 resolver = "2"

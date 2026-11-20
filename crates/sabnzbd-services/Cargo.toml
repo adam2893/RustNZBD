@@ -1,0 +1,14 @@
+[package]
+name = "sabnzbd-services"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sabnzbd-core = { path = "../sabnzbd-core" }
+sabnzbd-nzb = { path = "../sabnzbd-nzb" }
+chrono = { workspace = true }
+quick-xml = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

@@ -1,11 +1,13 @@
 use anyhow::Result;
 use parking_lot::RwLock;
 use sabnzbd_api::{create_router, extract_nzb_xml, AppState};
-use sabnzbd_core::{Config, JobStatus, QueueItem, ServerConfig};
+use sabnzbd_core::{Config, JobStatus, QueueItem, ScheduleAction, ServerConfig};
 use sabnzbd_decode::{FileAssembler, YencDecoder};
 use sabnzbd_nntp::{NntpError, NntpPool};
 use sabnzbd_nzb::{DownloadQueue, NzbDocument};
 use sabnzbd_postproc::PostProcessor;
+use sabnzbd_services::{Notifier, RssPoller, Scheduler};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,9 +42,10 @@ async fn main() -> Result<()> {
     let config = Arc::new(RwLock::new(loaded_cfg));
     let queue = Arc::new(DownloadQueue::new_persistent(state_path));
 
-    // Spawn background download & watched-folder workers
+    // Spawn background download, watched-folder, and scheduler/RSS workers
     tokio::spawn(download_worker_loop(config.clone(), queue.clone()));
     tokio::spawn(watch_dir_loop(config.clone(), queue.clone()));
+    tokio::spawn(scheduler_and_rss_loop(config.clone(), queue.clone()));
 
     let state = AppState {
         config: config.clone(),
@@ -119,6 +122,66 @@ async fn scan_watch_dir(dir: &Path, queue: &DownloadQueue) -> std::io::Result<()
     Ok(())
 }
 
+async fn scheduler_and_rss_loop(config: Arc<RwLock<Config>>, queue: Arc<DownloadQueue>) {
+    let mut scheduler = Scheduler::new();
+    let mut poller = RssPoller::new();
+    let mut last_poll: HashMap<String, Instant> = HashMap::new();
+
+    loop {
+        let (schedules, feeds) = {
+            let cfg = config.read();
+            (cfg.schedules.clone(), cfg.rss_feeds.clone())
+        };
+
+        let mut force_rss = false;
+        for action in scheduler.due_actions(&schedules, chrono::Local::now()) {
+            match action {
+                ScheduleAction::Pause => queue.pause(),
+                ScheduleAction::Resume => queue.resume(),
+                ScheduleAction::SpeedLimit(limit) => config.write().speed_limit = limit,
+                ScheduleAction::ScanRss => force_rss = true,
+            }
+        }
+
+        let detect_dups = config.read().detect_duplicates;
+        for feed in &feeds {
+            if !feed.enabled {
+                continue;
+            }
+            let due = force_rss
+                || last_poll
+                    .get(&feed.name)
+                    .map(|t| t.elapsed() >= Duration::from_secs(feed.interval_minutes.max(1) * 60))
+                    .unwrap_or(true);
+            if !due {
+                continue;
+            }
+            last_poll.insert(feed.name.clone(), Instant::now());
+            for item in poller.poll_feed(feed).await {
+                if let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(30)).build() {
+                    if let Ok(resp) = client.get(&item.link).send().await {
+                        if let Ok(bytes) = resp.bytes().await {
+                            let xml = extract_nzb_xml(&bytes);
+                            if let Ok(doc) = NzbDocument::parse(&xml) {
+                                let total = doc.total_bytes();
+                                let _ = queue.add_nzb_checked(
+                                    item.title,
+                                    total,
+                                    feed.category.clone(),
+                                    Some(doc),
+                                    detect_dups,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(15)).await;
+    }
+}
+
 async fn download_worker_loop(config: Arc<RwLock<Config>>, queue: Arc<DownloadQueue>) {
     loop {
         if let Some((job, doc)) = queue.claim_next_job() {
@@ -126,7 +189,15 @@ async fn download_worker_loop(config: Arc<RwLock<Config>>, queue: Arc<DownloadQu
             if let Err(err) = process_job(&config, &cfg_snapshot, &queue, &job, doc).await {
                 error!("Job {} failed: {}", job.id, err);
                 let job_dir = cfg_snapshot.download_dir.join(&job.filename);
-                queue.finish_job(&job.id, job_dir, Some(err));
+                queue.finish_job(&job.id, job_dir, Some(err.clone()));
+                Notifier::notify(
+                    &cfg_snapshot.notifications,
+                    false,
+                    &job.filename,
+                    &job.category,
+                    Some(&err),
+                )
+                .await;
             }
         } else {
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -275,7 +346,15 @@ async fn process_job(
     }
 
     info!("Job {} completed at {:?}", job.id, final_dir);
-    queue.finish_job(&job.id, final_dir, None);
+    queue.finish_job(&job.id, final_dir.clone(), None);
+    Notifier::notify(
+        &cfg.notifications,
+        true,
+        &job.filename,
+        &job.category,
+        final_dir.to_str(),
+    )
+    .await;
     Ok(())
 }
 

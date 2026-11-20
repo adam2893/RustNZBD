@@ -1122,14 +1122,21 @@ dependencies = [
  "anyhow",
  "axum",
  "bytes",
+ "chrono",
+ "crc32fast",
  "parking_lot",
+ "reqwest",
  "sabnzbd-api",
  "sabnzbd-core",
  "sabnzbd-decode",
  "sabnzbd-nntp",
  "sabnzbd-nzb",
  "sabnzbd-postproc",
+ "sabnzbd-services",
+ "serde_json",
+ "tempfile",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1198,7 +1205,22 @@ name = "sabnzbd-postproc"
 version = "0.1.0"
 dependencies = [
  "sabnzbd-core",
+ "tempfile",
  "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "sabnzbd-services"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "quick-xml",
+ "reqwest",
+ "sabnzbd-core",
+ "sabnzbd-nzb",
+ "serde_json",
  "tokio",
  "tracing",
 ]

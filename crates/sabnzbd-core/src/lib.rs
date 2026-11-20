@@ -74,6 +74,66 @@ pub struct Config {
     pub detect_duplicates: bool,
     #[serde(default)]
     pub passwords: Vec<String>,
+    #[serde(default)]
+    pub rss_feeds: Vec<RssFeedConfig>,
+    #[serde(default)]
+    pub schedules: Vec<ScheduleRule>,
+    #[serde(default)]
+    pub notifications: NotificationConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RssFeedConfig {
+    pub name: String,
+    pub uri: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_rss_interval")]
+    pub interval_minutes: u64,
+    #[serde(default = "default_cat")]
+    pub category: String,
+    #[serde(default)]
+    pub accept_filters: Vec<String>,
+    #[serde(default)]
+    pub reject_filters: Vec<String>,
+}
+
+fn default_rss_interval() -> u64 {
+    15
+}
+
+fn default_cat() -> String {
+    "default".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleAction {
+    Pause,
+    Resume,
+    SpeedLimit(Option<usize>),
+    ScanRss,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleRule {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub hour: u8,
+    pub minute: u8,
+    #[serde(default)]
+    pub days: Vec<u8>, // 1=Mon..7=Sun, empty = every day
+    pub action: ScheduleAction,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NotificationConfig {
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    #[serde(default = "default_true")]
+    pub notify_on_complete: bool,
+    #[serde(default = "default_true")]
+    pub notify_on_fail: bool,
 }
 
 fn default_true() -> bool {
@@ -102,6 +162,9 @@ impl Default for Config {
             deobfuscate_filenames: true,
             detect_duplicates: true,
             passwords: Vec::new(),
+            rss_feeds: Vec::new(),
+            schedules: Vec::new(),
+            notifications: NotificationConfig::default(),
         }
     }
 }
@@ -158,6 +221,78 @@ impl Config {
         let encoded = toml::to_string_pretty(self)?;
         std::fs::write(path, encoded)?;
         Ok(())
+    }
+
+    /// Imports core settings and `[[server]]` sections from a legacy `sabnzbd.ini` string.
+    pub fn import_sabnzbd_ini(ini: &str) -> Self {
+        let mut cfg = Self::default();
+        let mut section = String::new();
+        let mut current_server: Option<ServerConfig> = None;
+
+        for raw_line in ini.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+            if line.starts_with("[[") && line.ends_with("]]") {
+                if let Some(srv) = current_server.take() {
+                    cfg.servers.push(srv);
+                }
+                let name = line[2..line.len() - 2].trim().to_string();
+                current_server = Some(ServerConfig {
+                    name,
+                    enable: true,
+                    ..Default::default()
+                });
+                continue;
+            }
+            if line.starts_with('[') && line.ends_with(']') {
+                if let Some(srv) = current_server.take() {
+                    cfg.servers.push(srv);
+                }
+                section = line[1..line.len() - 1].trim().to_string();
+                continue;
+            }
+
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            let key = k.trim();
+            let val = v.trim();
+
+            if let Some(srv) = current_server.as_mut() {
+                match key {
+                    "host" => srv.host = val.to_string(),
+                    "port" => srv.port = val.parse().unwrap_or(srv.port),
+                    "ssl" => srv.ssl = val == "1" || val.eq_ignore_ascii_case("true"),
+                    "username" => srv.username = (!val.is_empty()).then(|| val.to_string()),
+                    "password" => srv.password = (!val.is_empty()).then(|| val.to_string()),
+                    "connections" => srv.connections = val.parse().unwrap_or(srv.connections),
+                    "priority" => srv.priority = val.parse().unwrap_or(0),
+                    "retention" => srv.retention = val.parse().unwrap_or(0),
+                    "enable" => srv.enable = val == "1" || val.eq_ignore_ascii_case("true"),
+                    "optional" => srv.optional = val == "1" || val.eq_ignore_ascii_case("true"),
+                    _ => {}
+                }
+            } else if section == "misc" {
+                match key {
+                    "api_key" if !val.is_empty() => cfg.api_key = val.to_string(),
+                    "nzb_key" if !val.is_empty() => cfg.nzb_key = val.to_string(),
+                    "port" => cfg.http_port = val.parse().unwrap_or(cfg.http_port),
+                    "host" if !val.is_empty() => cfg.http_host = val.to_string(),
+                    "download_dir" if !val.is_empty() => cfg.download_dir = PathBuf::from(val),
+                    "complete_dir" if !val.is_empty() => cfg.complete_dir = PathBuf::from(val),
+                    "dirscan_dir" if !val.is_empty() => cfg.watch_dir = Some(PathBuf::from(val)),
+                    "script_dir" if !val.is_empty() => cfg.script_dir = Some(PathBuf::from(val)),
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some(srv) = current_server.take() {
+            cfg.servers.push(srv);
+        }
+        cfg
     }
 }
 
@@ -231,5 +366,33 @@ mod tests {
         let (clean2, pass2) = extract_nzb_password("Plain.Release.nzb");
         assert_eq!(clean2, "Plain.Release.nzb");
         assert_eq!(pass2, None);
+    }
+
+    #[test]
+    fn test_import_sabnzbd_ini() {
+        let ini = r#"
+[misc]
+api_key = deadbeef1234
+port = 9090
+download_dir = /data/incomplete
+complete_dir = /data/complete
+[servers]
+[[news.provider.com]]
+host = news.provider.com
+port = 563
+ssl = 1
+username = alice
+password = secret
+connections = 16
+enable = 1
+"#;
+        let cfg = Config::import_sabnzbd_ini(ini);
+        assert_eq!(cfg.api_key, "deadbeef1234");
+        assert_eq!(cfg.http_port, 9090);
+        assert_eq!(cfg.complete_dir, PathBuf::from("/data/complete"));
+        assert_eq!(cfg.servers.len(), 1);
+        assert_eq!(cfg.servers[0].host, "news.provider.com");
+        assert_eq!(cfg.servers[0].connections, 16);
+        assert!(cfg.servers[0].ssl);
     }
 }
