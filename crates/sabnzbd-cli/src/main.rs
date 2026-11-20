@@ -18,8 +18,7 @@ use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -47,6 +46,108 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| PathBuf::from("rustnzbd_state.json"));
 
     let loaded_cfg = Config::load_or_create(&config_path)?;
+    let use_tray = loaded_cfg.enable_tray || args.iter().any(|a| a == "--tray");
+    let port = loaded_cfg.http_port;
+    let queue = Arc::new(DownloadQueue::new_persistent(state_path));
+    let shutdown_notify = Arc::new(Notify::new());
+
+    if use_tray {
+        let q_bg = queue.clone();
+        let sd_bg = shutdown_notify.clone();
+        let cfg_path_bg = config_path.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            if let Err(e) = rt.block_on(run_server(loaded_cfg, cfg_path_bg, q_bg, sd_bg)) {
+                error!("Server error: {}", e);
+            }
+        });
+        run_tray_loop(port, queue, shutdown_notify)?;
+    } else {
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(run_server(loaded_cfg, config_path, queue, shutdown_notify))?;
+    }
+    Ok(())
+}
+
+fn run_tray_loop(
+    port: u16,
+    queue: Arc<DownloadQueue>,
+    shutdown_notify: Arc<Notify>,
+) -> Result<()> {
+    use tao::event_loop::{ControlFlow, EventLoopBuilder};
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+    use tray_icon::{Icon, TrayIconBuilder};
+
+    let event_loop = EventLoopBuilder::new().build();
+    let menu = Menu::new();
+    let open_item = MenuItem::new("Open Web UI", true, None);
+    let pause_item = MenuItem::new("Pause Queue", true, None);
+    let resume_item = MenuItem::new("Resume Queue", true, None);
+    let quit_item = MenuItem::new("Quit RustNZBD", true, None);
+    menu.append(&open_item)?;
+    menu.append(&pause_item)?;
+    menu.append(&resume_item)?;
+    menu.append(&quit_item)?;
+
+    // 16x16 RGBA cyan/slate icon
+    let mut rgba = Vec::with_capacity(16 * 16 * 4);
+    for y in 0..16 {
+        for x in 0..16 {
+            let border = x == 0 || x == 15 || y == 0 || y == 15;
+            if border {
+                rgba.extend_from_slice(&[15, 23, 42, 255]);
+            } else {
+                rgba.extend_from_slice(&[56, 189, 248, 255]);
+            }
+        }
+    }
+    let icon = Icon::from_rgba(rgba, 16, 16)?;
+    let _tray = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_tooltip("RustNZBD")
+        .with_icon(icon)
+        .build()?;
+
+    let open_id = open_item.id().clone();
+    let pause_id = pause_item.id().clone();
+    let resume_id = resume_item.id().clone();
+    let quit_id = quit_item.id().clone();
+    let url = format!("http://127.0.0.1:{port}/");
+
+    event_loop.run(move |_event, _, control_flow| {
+        *control_flow = ControlFlow::WaitUntil(
+            std::time::Instant::now() + Duration::from_millis(200),
+        );
+        while let Ok(ev) = MenuEvent::receiver().try_recv() {
+            if ev.id == open_id {
+                open_browser(&url);
+            } else if ev.id == pause_id {
+                queue.pause();
+            } else if ev.id == resume_id {
+                queue.resume();
+            } else if ev.id == quit_id {
+                shutdown_notify.notify_one();
+                *control_flow = ControlFlow::Exit;
+            }
+        }
+    });
+}
+
+fn open_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd").args(["/c", "start", url]).spawn();
+}
+
+async fn run_server(
+    loaded_cfg: Config,
+    config_path: PathBuf,
+    queue: Arc<DownloadQueue>,
+    shutdown_notify: Arc<Notify>,
+) -> Result<()> {
     let port = loaded_cfg.http_port;
     let api_key = loaded_cfg.api_key.clone();
     let host_ip: std::net::IpAddr = loaded_cfg.http_host.parse().unwrap_or([0, 0, 0, 0].into());
@@ -56,9 +157,7 @@ async fn main() -> Result<()> {
     };
 
     let config = Arc::new(RwLock::new(loaded_cfg));
-    let queue = Arc::new(DownloadQueue::new_persistent(state_path));
     let stats = StatsTracker::new();
-    let shutdown_notify = Arc::new(Notify::new());
 
     // Spawn background download, watched-folder, and scheduler/RSS workers
     tokio::spawn(download_worker_loop(config.clone(), queue.clone(), stats.clone()));

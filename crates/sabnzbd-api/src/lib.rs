@@ -8,7 +8,7 @@ use axum::{
 };
 use flate2::read::GzDecoder;
 use parking_lot::RwLock;
-use sabnzbd_core::{Config, JobStatus, ServerConfig, StatsTracker};
+use sabnzbd_core::{Config, I18nCatalog, JobStatus, ServerConfig, StatsTracker};
 use sabnzbd_nzb::{DownloadQueue, NzbDocument};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -316,6 +316,23 @@ async fn handle_api_json(
 
         "auth" => json!({ "auth": "apikey" }),
 
+        "get_lang" => {
+            let cfg = state.config.read();
+            let lang = cfg.language.clone();
+            let (locales, strings) = if let Some(po_dir) = &cfg.po_dir {
+                let avail = I18nCatalog::available_locales(po_dir);
+                let cat = I18nCatalog::load_locale(po_dir, &lang);
+                (avail, cat.strings)
+            } else {
+                (vec!["en".to_string()], std::collections::HashMap::new())
+            };
+            json!({
+                "language": lang,
+                "locales": locales,
+                "strings": strings
+            })
+        }
+
         "fullstatus" => {
             json!({
                 "status": {
@@ -385,6 +402,9 @@ async fn handle_api_json(
                 }
                 if let Some(v) = patch.get("speed_limit") {
                     cfg.speed_limit = v.as_u64().map(|n| n as usize);
+                }
+                if let Some(v) = patch.get("language").and_then(|x| x.as_str()) {
+                    cfg.language = v.to_string();
                 }
                 if let Some(v) = patch.get("passwords") {
                     if let Ok(pw) = serde_json::from_value(v.clone()) {

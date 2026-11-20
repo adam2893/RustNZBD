@@ -24,6 +24,8 @@ tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
+tray-icon = "0.26"
+tao = "0.37"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 parking_lot = { workspace = true }

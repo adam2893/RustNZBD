@@ -93,6 +93,16 @@ pub struct Config {
     pub https_cert: Option<PathBuf>,
     #[serde(default)]
     pub https_key: Option<PathBuf>,
+    #[serde(default = "default_lang")]
+    pub language: String,
+    #[serde(default)]
+    pub po_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub enable_tray: bool,
+}
+
+fn default_lang() -> String {
+    "en".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +249,9 @@ impl Default for Config {
             https_port: None,
             https_cert: None,
             https_key: None,
+            language: default_lang(),
+            po_dir: None,
+            enable_tray: false,
         }
     }
 }
@@ -453,6 +466,122 @@ impl StatsTracker {
     }
 }
 
+/// GNU gettext `.po` translation catalog compatible with SABnzbd's `po/` files.
+#[derive(Debug, Clone, Default)]
+pub struct I18nCatalog {
+    pub language: String,
+    pub strings: HashMap<String, String>,
+}
+
+impl I18nCatalog {
+    /// Parses GNU gettext `.po` content (`msgid` / `msgstr` pairs, including multi-line continuations).
+    pub fn parse_po(lang: &str, content: &str) -> Self {
+        let mut strings = HashMap::new();
+        let mut current_id = String::new();
+        let mut current_str = String::new();
+        let mut mode: u8 = 0; // 0=none, 1=msgid, 2=msgstr
+
+        let flush = |id: &mut String, val: &mut String, map: &mut HashMap<String, String>| {
+            if !id.is_empty() && !val.is_empty() {
+                map.insert(id.clone(), val.clone());
+            }
+            id.clear();
+            val.clear();
+        };
+
+        for raw_line in content.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                if line.is_empty() && mode == 2 {
+                    flush(&mut current_id, &mut current_str, &mut strings);
+                    mode = 0;
+                }
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("msgid ") {
+                if mode == 2 {
+                    flush(&mut current_id, &mut current_str, &mut strings);
+                }
+                mode = 1;
+                current_id = Self::unquote_po(rest);
+            } else if let Some(rest) = line.strip_prefix("msgstr ") {
+                mode = 2;
+                current_str = Self::unquote_po(rest);
+            } else if line.starts_with('"') {
+                let piece = Self::unquote_po(line);
+                match mode {
+                    1 => current_id.push_str(&piece),
+                    2 => current_str.push_str(&piece),
+                    _ => {}
+                }
+            }
+        }
+        if mode == 2 {
+            flush(&mut current_id, &mut current_str, &mut strings);
+        }
+
+        Self {
+            language: lang.to_string(),
+            strings,
+        }
+    }
+
+    pub fn load_locale(po_dir: &Path, lang: &str) -> Self {
+        let candidates = [
+            po_dir.join(format!("{lang}.po")),
+            po_dir.join("main").join(format!("{lang}.po")),
+            po_dir.join(lang).join("LC_MESSAGES").join("SABnzbd.po"),
+        ];
+        for path in candidates {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                return Self::parse_po(lang, &content);
+            }
+        }
+        Self {
+            language: lang.to_string(),
+            strings: HashMap::new(),
+        }
+    }
+
+    pub fn available_locales(po_dir: &Path) -> Vec<String> {
+        let mut langs = vec!["en".to_string()];
+        let search_dirs = [po_dir.to_path_buf(), po_dir.join("main")];
+        for dir in search_dirs {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.extension().and_then(|s| s.to_str()) == Some("po") {
+                        if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                            if !langs.contains(&stem.to_string()) {
+                                langs.push(stem.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        langs.sort();
+        langs
+    }
+
+    pub fn t<'a>(&'a self, key: &'a str) -> &'a str {
+        self.strings.get(key).map(|s| s.as_str()).unwrap_or(key)
+    }
+
+    fn unquote_po(raw: &str) -> String {
+        let trimmed = raw.trim();
+        let inner = trimmed
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(trimmed);
+        inner
+            .replace("\\n", "\n")
+            .replace("\\t", "\t")
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,5 +637,25 @@ enable = 1
         assert_eq!(cfg.servers[0].host, "news.provider.com");
         assert_eq!(cfg.servers[0].connections, 16);
         assert!(cfg.servers[0].ssl);
+    }
+
+    #[test]
+    fn test_i18n_po_parser() {
+        let po = r#"
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+
+msgid "Queue"
+msgstr "Warteschlange"
+
+msgid "Download"
+" complete"
+msgstr "Download abgeschlossen"
+"#;
+        let cat = I18nCatalog::parse_po("de", po);
+        assert_eq!(cat.t("Queue"), "Warteschlange");
+        assert_eq!(cat.t("Download complete"), "Download abgeschlossen");
+        assert_eq!(cat.t("Unknown"), "Unknown");
     }
 }
