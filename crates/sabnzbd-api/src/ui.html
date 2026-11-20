@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RustNZBD</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --card: #1e293b;
+            --border: #334155;
+            --text: #f8fafc;
+            --muted: #94a3b8;
+            --accent: #38bdf8;
+            --ok: #22c55e;
+            --warn: #f59e0b;
+            --err: #ef4444;
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            margin: 0;
+            padding: 24px;
+            background: var(--bg);
+            color: var(--text);
+        }
+        .container { max-width: 1000px; margin: 0 auto; display: grid; gap: 20px; }
+        header {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            background: var(--card);
+            padding: 18px 22px;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+        }
+        h1 { margin: 0; font-size: 22px; color: var(--accent); display: flex; align-items: center; gap: 10px; }
+        .badge {
+            background: #0369a1;
+            color: #fff;
+            padding: 3px 10px;
+            border-radius: 9999px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .card {
+            background: var(--card);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid var(--border);
+        }
+        h2 { margin: 0 0 14px 0; font-size: 16px; color: var(--text); }
+        input, button, select {
+            background: #0f172a;
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 13px;
+        }
+        button {
+            cursor: pointer;
+            background: #0284c7;
+            border-color: #0284c7;
+            font-weight: 600;
+        }
+        button:hover { background: #0369a1; }
+        button.secondary { background: #334155; border-color: #475569; }
+        button.danger { background: #dc2626; border-color: #dc2626; padding: 4px 10px; font-size: 12px; }
+        .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+        .grow { flex: 1; min-width: 200px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); }
+        th { color: var(--muted); font-weight: 600; }
+        .progress {
+            width: 120px;
+            height: 8px;
+            background: #0f172a;
+            border-radius: 999px;
+            overflow: hidden;
+        }
+        .progress-bar { height: 100%; background: var(--accent); transition: width 0.2s; }
+        .muted { color: var(--muted); font-size: 13px; }
+        .msg { font-size: 13px; margin-top: 8px; color: var(--accent); min-height: 18px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>RustNZBD <span id="statusBadge" class="badge">Idle</span> <span id="speedText" class="muted">0 K/s</span></h1>
+            <div class="controls">
+                <input id="apiKeyInput" type="password" placeholder="API Key" />
+                <button onclick="saveApiKey()">Save Key</button>
+                <button id="pauseBtn" class="secondary" onclick="togglePause()">Pause</button>
+            </div>
+        </header>
+
+        <section class="card">
+            <h2>Add NZB</h2>
+            <div class="row" style="margin-bottom: 10px;">
+                <input id="urlInput" class="grow" type="text" placeholder="https://example.com/file.nzb" />
+                <input id="catInput" type="text" placeholder="category" value="default" style="width: 110px;" />
+                <button onclick="addUrl()">Add URL</button>
+            </div>
+            <div class="row">
+                <input id="fileInput" type="file" accept=".nzb" />
+                <button onclick="addFile()">Upload NZB</button>
+            </div>
+            <div id="feedback" class="msg"></div>
+        </section>
+
+        <section class="card">
+            <h2>Queue</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Status</th>
+                        <th>Progress</th>
+                        <th>Size</th>
+                        <th>Category</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="queueBody">
+                    <tr><td colspan="6" class="muted">Loading...</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section class="card">
+            <h2>History</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Status</th>
+                        <th>Size</th>
+                        <th>Category</th>
+                        <th>Path</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="historyBody">
+                    <tr><td colspan="6" class="muted">Loading...</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section class="card">
+            <h2>NNTP Servers</h2>
+            <div id="serversList" class="muted" style="margin-bottom: 12px;">No servers loaded</div>
+            <div class="row">
+                <input id="srvName" type="text" placeholder="Name" value="Primary" style="width: 110px;" />
+                <input id="srvHost" class="grow" type="text" placeholder="news.example.com" />
+                <input id="srvPort" type="number" placeholder="Port" value="563" style="width: 80px;" />
+                <label class="muted"><input id="srvSsl" type="checkbox" checked /> SSL</label>
+                <input id="srvUser" type="text" placeholder="Username" style="width: 120px;" />
+                <input id="srvPass" type="password" placeholder="Password" style="width: 120px;" />
+                <input id="srvConns" type="number" placeholder="Conns" value="8" style="width: 75px;" />
+                <button onclick="addServer()">Add Server</button>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        let isPaused = false;
+        const keyInput = document.getElementById('apiKeyInput');
+        keyInput.value = localStorage.getItem('rustnzbd_apikey') || '';
+
+        function apiKey() {
+            return encodeURIComponent(keyInput.value.trim());
+        }
+
+        function saveApiKey() {
+            localStorage.setItem('rustnzbd_apikey', keyInput.value.trim());
+            refreshAll();
+        }
+
+        function setMsg(text) {
+            document.getElementById('feedback').textContent = text;
+        }
+
+        async function apiCall(params, options = {}) {
+            const res = await fetch(`/api?apikey=${apiKey()}&${params}`, options);
+            return await res.json();
+        }
+
+        async function refreshQueue() {
+            const data = await apiCall('mode=queue');
+            if (data.error) {
+                document.getElementById('queueBody').innerHTML = `<tr><td colspan="6" class="muted">${data.error}</td></tr>`;
+                return;
+            }
+            const q = data.queue;
+            isPaused = q.paused;
+            document.getElementById('statusBadge').textContent = q.status;
+            document.getElementById('speedText').textContent = `${q.speed}/s`;
+            document.getElementById('pauseBtn').textContent = isPaused ? 'Resume' : 'Pause';
+
+            const body = document.getElementById('queueBody');
+            if (!q.slots.length) {
+                body.innerHTML = '<tr><td colspan="6" class="muted">Queue is empty</td></tr>';
+                return;
+            }
+            body.innerHTML = q.slots.map(s => `
+                <tr>
+                    <td>${escapeHtml(s.filename)}</td>
+                    <td>${escapeHtml(s.status)}</td>
+                    <td>
+                        <div class="progress"><div class="progress-bar" style="width:${s.percentage}%"></div></div>
+                    </td>
+                    <td>${escapeHtml(s.sizeleft)} / ${escapeHtml(s.size)}</td>
+                    <td>${escapeHtml(s.cat)}</td>
+                    <td><button class="danger" onclick="deleteQueue('${s.nzo_id}')">Delete</button></td>
+                </tr>
+            `).join('');
+        }
+
+        async function refreshHistory() {
+            const data = await apiCall('mode=history');
+            if (data.error) return;
+            const body = document.getElementById('historyBody');
+            const slots = data.history.slots;
+            if (!slots.length) {
+                body.innerHTML = '<tr><td colspan="6" class="muted">No history</td></tr>';
+                return;
+            }
+            body.innerHTML = slots.map(s => `
+                <tr>
+                    <td>${escapeHtml(s.name)}</td>
+                    <td>${escapeHtml(s.status)}</td>
+                    <td>${escapeHtml(s.size)}</td>
+                    <td>${escapeHtml(s.category)}</td>
+                    <td class="muted">${escapeHtml(s.storage || '')}</td>
+                    <td><button class="danger" onclick="deleteHistory('${s.nzo_id}')">Delete</button></td>
+                </tr>
+            `).join('');
+        }
+
+        async function refreshServers() {
+            const data = await apiCall('mode=get_config');
+            if (data.error || !data.config) return;
+            const servers = data.config.servers || [];
+            const el = document.getElementById('serversList');
+            if (!servers.length) {
+                el.textContent = 'No NNTP servers configured.';
+                return;
+            }
+            el.innerHTML = servers.map(s =>
+                `<div>• <strong>${escapeHtml(s.name)}</strong> (${escapeHtml(s.host)}:${s.port}, ssl=${s.ssl}, conns=${s.connections}, priority=${s.priority})</div>`
+            ).join('');
+        }
+
+        async function togglePause() {
+            await apiCall(isPaused ? 'mode=resume' : 'mode=pause');
+            refreshQueue();
+        }
+
+        async function addUrl() {
+            const url = document.getElementById('urlInput').value.trim();
+            const cat = document.getElementById('catInput').value.trim() || 'default';
+            if (!url) return;
+            setMsg('Fetching NZB URL...');
+            const res = await apiCall(`mode=addurl&name=${encodeURIComponent(url)}&cat=${encodeURIComponent(cat)}`);
+            setMsg(res.status ? `Added: ${res.nzo_ids.join(', ')}` : `Error: ${res.error}`);
+            refreshQueue();
+        }
+
+        async function addFile() {
+            const file = document.getElementById('fileInput').files[0];
+            const cat = document.getElementById('catInput').value.trim() || 'default';
+            if (!file) return;
+            const text = await file.text();
+            const res = await apiCall(`mode=addfile&nzbname=${encodeURIComponent(file.name)}&cat=${encodeURIComponent(cat)}`, {
+                method: 'POST',
+                body: text
+            });
+            setMsg(res.status ? `Added: ${res.nzo_ids.join(', ')}` : `Error: ${res.error}`);
+            refreshQueue();
+        }
+
+        async function addServer() {
+            const payload = {
+                name: document.getElementById('srvName').value.trim() || 'Server',
+                host: document.getElementById('srvHost').value.trim(),
+                port: parseInt(document.getElementById('srvPort').value, 10) || 563,
+                ssl: document.getElementById('srvSsl').checked,
+                username: document.getElementById('srvUser').value.trim() || null,
+                password: document.getElementById('srvPass').value || null,
+                connections: parseInt(document.getElementById('srvConns').value, 10) || 8,
+                retention: 0,
+                priority: 0,
+                enable: true,
+                optional: false
+            };
+            if (!payload.host) return setMsg('Server host required');
+            const res = await apiCall('mode=add_server', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            setMsg(res.status ? 'Server saved' : `Error: ${res.error}`);
+            refreshServers();
+        }
+
+        async function deleteQueue(id) {
+            await apiCall(`mode=queue&name=delete&value=${encodeURIComponent(id)}`);
+            refreshQueue();
+        }
+
+        async function deleteHistory(id) {
+            await apiCall(`mode=history&name=delete&value=${encodeURIComponent(id)}`);
+            refreshHistory();
+        }
+
+        function escapeHtml(str) {
+            return String(str).replace(/[&<>"']/g, c => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[c]));
+        }
+
+        function refreshAll() {
+            refreshQueue();
+            refreshHistory();
+            refreshServers();
+        }
+
+        refreshAll();
+        setInterval(() => { refreshQueue(); refreshHistory(); }, 2000);
+    </script>
+</body>
+</html>

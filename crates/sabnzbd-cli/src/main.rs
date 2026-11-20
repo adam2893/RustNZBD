@@ -42,6 +42,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         config: config.clone(),
         queue: queue.clone(),
+        config_path: Some(config_path.clone()),
     };
 
     let app = create_router(state);
@@ -146,6 +147,20 @@ async fn process_job(
     queue.set_status(&job.id, JobStatus::Checking);
     if let Err(e) = PostProcessor::verify_and_repair(&work_dir).await {
         warn!("PAR2 check/repair issue for {}: {}", job.id, e);
+    }
+
+    queue.set_status(&job.id, JobStatus::Extracting);
+    if let Ok(mut entries) = tokio::fs::read_dir(&work_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                if matches!(ext.to_ascii_lowercase().as_str(), "rar" | "zip" | "7z") {
+                    if let Err(e) = PostProcessor::extract_archive(&path, &work_dir).await {
+                        warn!("Archive extraction issue for {:?}: {}", path, e);
+                    }
+                }
+            }
+        }
     }
 
     let final_dir = cfg.complete_dir.join(&safe_job_name);

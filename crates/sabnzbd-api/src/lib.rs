@@ -6,14 +6,16 @@ use axum::{
     Router,
 };
 use parking_lot::RwLock;
-use sabnzbd_core::{Config, JobStatus};
+use sabnzbd_core::{Config, JobStatus, ServerConfig};
 use sabnzbd_nzb::{DownloadQueue, NzbDocument};
 use serde::Deserialize;
 use serde_json::json;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 pub const SABNZBD_VERSION: &str = "4.4.1";
 
@@ -21,6 +23,7 @@ pub const SABNZBD_VERSION: &str = "4.4.1";
 pub struct AppState {
     pub config: Arc<RwLock<Config>>,
     pub queue: Arc<DownloadQueue>,
+    pub config_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,27 +48,7 @@ pub fn create_router(state: AppState) -> Router {
 }
 
 async fn index_handler() -> Html<&'static str> {
-    Html(r#"<!DOCTYPE html>
-<html>
-<head>
-    <title>RustNZBD</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 40px; background: #0f172a; color: #f8fafc; }
-        .card { background: #1e293b; border-radius: 12px; padding: 24px; max-width: 650px; margin: auto; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); }
-        h1 { color: #38bdf8; margin-top: 0; }
-        .badge { background: #0369a1; padding: 4px 10px; border-radius: 9999px; font-size: 13px; font-weight: bold; }
-        code { background: #334155; padding: 2px 6px; border-radius: 4px; font-family: monospace; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h1>RustNZBD <span class="badge">SABnzbd in Rust</span></h1>
-        <p>High-performance Usenet client written in Rust with full SABnzbd REST API compatibility.</p>
-        <p>API endpoint: <code>/api?mode=queue&amp;apikey=...</code></p>
-        <p>Compatible with Sonarr, Radarr, Lidarr, Readarr, and SABnzbd frontends.</p>
-    </div>
-</body>
-</html>"#)
+    Html(include_str!("ui.html"))
 }
 
 fn check_auth(state: &AppState, mode: &str, apikey: &Option<String>) -> Option<Response> {
@@ -240,15 +223,102 @@ async fn handle_api(
             })).into_response()
         }
 
+        "get_config" => {
+            let mut cfg = state.config.read().clone();
+            for s in &mut cfg.servers {
+                if s.password.is_some() {
+                    s.password = Some("********".to_string());
+                }
+            }
+            Json(json!({ "config": cfg })).into_response()
+        }
+
+        "add_server" => {
+            let Some(raw_body) = body else {
+                return Json(json!({ "status": false, "error": "Missing server JSON" })).into_response();
+            };
+            let server: ServerConfig = match serde_json::from_slice(&raw_body) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Json(json!({ "status": false, "error": format!("Invalid server JSON: {}", e) })).into_response();
+                }
+            };
+            {
+                let mut cfg = state.config.write();
+                cfg.servers.push(server);
+                if let Some(path) = &state.config_path {
+                    if let Err(e) = cfg.save(path) {
+                        warn!("Failed saving config to {:?}: {}", path, e);
+                    }
+                }
+            }
+            Json(json!({ "status": true })).into_response()
+        }
+
         "addurl" => {
             let url = query.name.unwrap_or_default();
+            if url.is_empty() {
+                return Json(json!({ "status": false, "error": "Missing URL" })).into_response();
+            }
             let cat = query.cat.unwrap_or_else(|| "default".to_string());
-            info!("Add URL received: {}", url);
-            let item = state.queue.add_nzb(url, 0, cat);
-            Json(json!({
-                "status": true,
-                "nzo_ids": [item.id]
-            })).into_response()
+            let fallback_name = query
+                .nzbname
+                .unwrap_or_else(|| {
+                    url.rsplit('/')
+                        .next()
+                        .and_then(|s| s.split('?').next())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("download.nzb")
+                        .to_string()
+                });
+
+            info!("Fetching NZB from URL: {}", url);
+            let client = match reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    return Json(json!({ "status": false, "error": format!("HTTP client error: {}", e) })).into_response();
+                }
+            };
+
+            let resp = match client.get(&url).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    return Json(json!({ "status": false, "error": format!("Fetch failed: {}", e) })).into_response();
+                }
+            };
+
+            if !resp.status().is_success() {
+                return Json(json!({
+                    "status": false,
+                    "error": format!("Upstream returned HTTP {}", resp.status())
+                })).into_response();
+            }
+
+            let raw_bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    return Json(json!({ "status": false, "error": format!("Read body failed: {}", e) })).into_response();
+                }
+            };
+
+            let xml_str = extract_nzb_xml(&raw_bytes);
+            match NzbDocument::parse(&xml_str) {
+                Ok(doc) => {
+                    let total_bytes = doc.total_bytes();
+                    let item = state.queue.add_nzb_with_doc(fallback_name, total_bytes, cat, Some(doc));
+                    Json(json!({
+                        "status": true,
+                        "nzo_ids": [item.id]
+                    })).into_response()
+                }
+                Err(e) => Json(json!({
+                    "status": false,
+                    "error": format!("Invalid NZB XML from URL: {}", e)
+                })).into_response(),
+            }
         }
 
         "addfile" => {
@@ -294,4 +364,146 @@ fn extract_nzb_xml(raw: &[u8]) -> String {
         }
     }
     text.into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    fn test_state(cfg_path: Option<PathBuf>) -> (AppState, String) {
+        let cfg = Config::default();
+        let key = cfg.api_key.clone();
+        let state = AppState {
+            config: Arc::new(RwLock::new(cfg)),
+            queue: Arc::new(DownloadQueue::new()),
+            config_path: cfg_path,
+        };
+        (state, key)
+    }
+
+    async fn json_body(resp: Response) -> Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_api_version_and_auth() {
+        let (state, _) = test_state(None);
+        let app = create_router(state);
+
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/api?mode=version").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = json_body(resp).await;
+        assert_eq!(v["version"], SABNZBD_VERSION);
+
+        let resp = app
+            .oneshot(Request::get("/api?mode=queue&apikey=wrong").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let v = json_body(resp).await;
+        assert_eq!(v["status"], false);
+    }
+
+    #[tokio::test]
+    async fn test_api_addfile_queue_pause_delete() {
+        let (state, key) = test_state(None);
+        let app = create_router(state);
+
+        let nzb = r#"<nzb><file poster="a" date="1" subject="s"><groups><group>alt.test</group></groups><segments><segment bytes="1234" number="1">id1@test</segment></segments></file></nzb>"#;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api?mode=addfile&nzbname=demo.nzb&cat=tv&apikey={key}"))
+                    .body(Body::from(nzb))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let add_json = json_body(resp).await;
+        assert_eq!(add_json["status"], true);
+        let nzo_id = add_json["nzo_ids"][0].as_str().unwrap().to_string();
+
+        // Pause
+        let resp = app
+            .clone()
+            .oneshot(Request::get(format!("/api?mode=pause&apikey={key}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(json_body(resp).await["status"], true);
+
+        // Queue shows paused + 1 slot
+        let resp = app
+            .clone()
+            .oneshot(Request::get(format!("/api?mode=queue&apikey={key}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let q = json_body(resp).await;
+        assert_eq!(q["queue"]["paused"], true);
+        assert_eq!(q["queue"]["slots"].as_array().unwrap().len(), 1);
+        assert_eq!(q["queue"]["slots"][0]["filename"], "demo.nzb");
+
+        // Delete
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api?mode=queue&name=delete&value={nzo_id}&apikey={key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(resp).await["status"], true);
+    }
+
+    #[tokio::test]
+    async fn test_api_add_server_redacts_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("rustnzbd.toml");
+        let (state, key) = test_state(Some(cfg_path.clone()));
+        let app = create_router(state);
+
+        let srv = json!({
+            "name": "Usenet",
+            "host": "news.example.com",
+            "port": 563,
+            "ssl": true,
+            "username": "u",
+            "password": "supersecretpassword",
+            "connections": 8,
+            "retention": 0,
+            "priority": 0,
+            "enable": true,
+            "optional": false
+        });
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api?mode=add_server&apikey={key}"))
+                    .body(Body::from(srv.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(resp).await["status"], true);
+        assert!(cfg_path.exists());
+
+        let resp = app
+            .oneshot(Request::get(format!("/api?mode=get_config&apikey={key}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let cfg = json_body(resp).await;
+        assert_eq!(cfg["config"]["servers"][0]["password"], "********");
+    }
 }
