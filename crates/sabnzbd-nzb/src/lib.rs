@@ -2,7 +2,7 @@ use chrono::Utc;
 use parking_lot::RwLock;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
-use sabnzbd_core::{HistoryItem, JobStatus, QueueItem};
+use sabnzbd_core::{extract_nzb_password, HistoryItem, JobStatus, QueueItem};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -17,6 +17,8 @@ pub enum NzbError {
     Xml(#[from] quick_xml::Error),
     #[error("Invalid NZB: {0}")]
     Invalid(String),
+    #[error("Duplicate NZB: {0}")]
+    Duplicate(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +241,7 @@ impl DownloadQueue {
         category: String,
         document: Option<NzbDocument>,
     ) -> QueueItem {
+        let (clean_name, password) = extract_nzb_password(&filename);
         let status = if *self.paused.read() {
             JobStatus::Paused
         } else {
@@ -246,12 +249,14 @@ impl DownloadQueue {
         };
         let item = QueueItem {
             id: format!("SABnzbd_nzo_{}", &Uuid::new_v4().to_string().replace('-', "")[..10]),
-            filename,
+            filename: clean_name,
             total_bytes,
             downloaded_bytes: 0,
             status,
             priority: 0,
             category,
+            password,
+            script: None,
             eta_seconds: None,
             speed_bps: 0,
             time_added: Utc::now(),
@@ -263,6 +268,67 @@ impl DownloadQueue {
         });
         self.persist();
         item
+    }
+
+    /// Checks whether a job with the same name (or same non-zero byte size + name) exists in queue or history.
+    pub fn is_duplicate(&self, filename: &str, total_bytes: u64) -> bool {
+        let (clean_name, _) = extract_nzb_password(filename);
+        let needle = clean_name.to_ascii_lowercase();
+        let in_queue = self.items.read().iter().any(|e| {
+            e.item.filename.to_ascii_lowercase() == needle
+                || (total_bytes > 0 && e.item.total_bytes == total_bytes && e.item.filename.eq_ignore_ascii_case(&clean_name))
+        });
+        if in_queue {
+            return true;
+        }
+        self.history
+            .read()
+            .iter()
+            .any(|h| h.name.to_ascii_lowercase() == needle)
+    }
+
+    pub fn add_nzb_checked(
+        &self,
+        filename: String,
+        total_bytes: u64,
+        category: String,
+        document: Option<NzbDocument>,
+        reject_duplicates: bool,
+    ) -> Result<QueueItem, NzbError> {
+        if reject_duplicates && self.is_duplicate(&filename, total_bytes) {
+            return Err(NzbError::Duplicate(filename));
+        }
+        Ok(self.add_nzb_with_doc(filename, total_bytes, category, document))
+    }
+
+    pub fn set_priority(&self, id: &str, priority: i32) -> bool {
+        let mut changed = false;
+        for entry in self.items.write().iter_mut() {
+            if entry.item.id == id {
+                entry.item.priority = priority;
+                changed = true;
+                break;
+            }
+        }
+        if changed {
+            self.persist();
+        }
+        changed
+    }
+
+    pub fn set_category(&self, id: &str, category: String) -> bool {
+        let mut changed = false;
+        for entry in self.items.write().iter_mut() {
+            if entry.item.id == id {
+                entry.item.category = category;
+                changed = true;
+                break;
+            }
+        }
+        if changed {
+            self.persist();
+        }
+        changed
     }
 
     pub fn list(&self) -> Vec<QueueItem> {
@@ -504,5 +570,28 @@ mod tests {
         assert_eq!(recovered.list().len(), 1);
         assert_eq!(recovered.list()[0].filename, "inflight.nzb");
         assert_eq!(recovered.list()[0].status, JobStatus::Queued);
+    }
+
+    #[test]
+    fn test_duplicate_detection_and_priority_ordering() {
+        let q = DownloadQueue::new();
+        let first = q
+            .add_nzb_checked("Show.S01E01{{pass1}}.nzb".to_string(), 1000, "tv".to_string(), Some(NzbDocument { files: vec![] }), true)
+            .unwrap();
+        assert_eq!(first.filename, "Show.S01E01.nzb");
+        assert_eq!(first.password.as_deref(), Some("pass1"));
+
+        let dup = q.add_nzb_checked("show.s01e01.nzb".to_string(), 1000, "tv".to_string(), None, true);
+        assert!(matches!(dup, Err(NzbError::Duplicate(_))));
+
+        let second = q
+            .add_nzb_checked("Show.S01E02.nzb".to_string(), 2000, "tv".to_string(), Some(NzbDocument { files: vec![] }), true)
+            .unwrap();
+        assert!(q.set_priority(&second.id, 10));
+        assert!(q.set_category(&second.id, "movies".to_string()));
+
+        let (claimed, _) = q.claim_next_job().unwrap();
+        assert_eq!(claimed.id, second.id);
+        assert_eq!(claimed.category, "movies");
     }
 }

@@ -218,16 +218,44 @@ async fn process_job(
     }
 
     queue.set_status(&job.id, JobStatus::Extracting);
+    let mut passwords = Vec::new();
+    if let Some(p) = &job.password {
+        passwords.push(p.clone());
+    }
+    passwords.extend(cfg.passwords.iter().cloned());
+
+    let mut extracted_any = false;
     if let Ok(mut entries) = tokio::fs::read_dir(&work_dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
-            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                if matches!(ext.to_ascii_lowercase().as_str(), "rar" | "zip" | "7z") {
-                    if let Err(e) = PostProcessor::extract_archive(&path, &work_dir).await {
-                        warn!("Archive extraction issue for {:?}: {}", path, e);
-                    }
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let should_extract = match ext.as_str() {
+                "rar" => PostProcessor::is_primary_rar_volume(&path),
+                "zip" | "7z" => true,
+                _ => false,
+            };
+            if should_extract {
+                match PostProcessor::extract_archive_with_passwords(&path, &work_dir, &passwords).await {
+                    Ok(()) => extracted_any = true,
+                    Err(e) => warn!("Archive extraction issue for {:?}: {}", path, e),
                 }
             }
+        }
+    }
+
+    if cfg.cleanup_archives && extracted_any {
+        if let Err(e) = PostProcessor::cleanup_processed_files(&work_dir).await {
+            warn!("Cleanup issue for {}: {}", job.id, e);
+        }
+    }
+
+    if cfg.deobfuscate_filenames {
+        if let Err(e) = PostProcessor::deobfuscate_dir(&work_dir, &job.filename).await {
+            warn!("Deobfuscation issue for {}: {}", job.id, e);
         }
     }
 
@@ -236,6 +264,15 @@ async fn process_job(
     move_to_complete(&work_dir, &final_dir)
         .await
         .map_err(|e| e.to_string())?;
+
+    if let (Some(script_dir), Some(script_name)) = (&cfg.script_dir, job.script.as_ref().or(cfg.default_script.as_ref())) {
+        let script_path = script_dir.join(script_name);
+        if script_path.exists() {
+            if let Err(e) = PostProcessor::run_postproc_script(&script_path, &final_dir, &job.filename, &job.category, true).await {
+                warn!("Post-proc script failed for {}: {}", job.id, e);
+            }
+        }
+    }
 
     info!("Job {} completed at {:?}", job.id, final_dir);
     queue.finish_job(&job.id, final_dir, None);

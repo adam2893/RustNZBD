@@ -111,6 +111,11 @@ async fn handle_api(
                         let ok = state.queue.resume_item(id);
                         return Json(json!({ "status": ok, "nzo_ids": [id] })).into_response();
                     }
+                    Some("priority") => {
+                        let prio = query.priority.unwrap_or(0);
+                        let ok = state.queue.set_priority(id, prio);
+                        return Json(json!({ "status": ok, "position": prio })).into_response();
+                    }
                     _ => {}
                 }
             }
@@ -245,6 +250,14 @@ async fn handle_api(
 
         "warnings" => Json(json!({ "warnings": [] })).into_response(),
 
+        "change_cat" => {
+            if let (Some(id), Some(cat)) = (query.value.as_deref(), query.name.clone()) {
+                let ok = state.queue.set_category(id, cat);
+                return Json(json!({ "status": ok })).into_response();
+            }
+            Json(json!({ "status": false, "error": "Missing value or name" })).into_response()
+        }
+
         "auth" => Json(json!({ "auth": "apikey" })).into_response(),
 
         "fullstatus" => {
@@ -367,11 +380,17 @@ async fn handle_api(
             match NzbDocument::parse(&xml_str) {
                 Ok(doc) => {
                     let total_bytes = doc.total_bytes();
-                    let item = state.queue.add_nzb_with_doc(fallback_name, total_bytes, cat, Some(doc));
-                    Json(json!({
-                        "status": true,
-                        "nzo_ids": [item.id]
-                    })).into_response()
+                    let reject_dups = state.config.read().detect_duplicates;
+                    match state.queue.add_nzb_checked(fallback_name, total_bytes, cat, Some(doc), reject_dups) {
+                        Ok(item) => Json(json!({
+                            "status": true,
+                            "nzo_ids": [item.id]
+                        })).into_response(),
+                        Err(e) => Json(json!({
+                            "status": false,
+                            "error": e.to_string()
+                        })).into_response(),
+                    }
                 }
                 Err(e) => Json(json!({
                     "status": false,
@@ -394,11 +413,17 @@ async fn handle_api(
                         .unwrap_or_else(|| "upload.nzb".to_string());
                     let cat = query.cat.unwrap_or_else(|| "default".to_string());
                     info!("Add NZB file: {} ({} bytes)", name, total_bytes);
-                    let item = state.queue.add_nzb_with_doc(name, total_bytes, cat, Some(doc));
-                    Json(json!({
-                        "status": true,
-                        "nzo_ids": [item.id]
-                    })).into_response()
+                    let reject_dups = state.config.read().detect_duplicates;
+                    match state.queue.add_nzb_checked(name, total_bytes, cat, Some(doc), reject_dups) {
+                        Ok(item) => Json(json!({
+                            "status": true,
+                            "nzo_ids": [item.id]
+                        })).into_response(),
+                        Err(e) => Json(json!({
+                            "status": false,
+                            "error": e.to_string()
+                        })).into_response(),
+                    }
                 }
                 Err(e) => Json(json!({
                     "status": false,

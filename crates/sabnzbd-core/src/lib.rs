@@ -59,9 +59,25 @@ pub struct Config {
     #[serde(default)]
     pub watch_dir: Option<PathBuf>,
     #[serde(default)]
+    pub script_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub default_script: Option<String>,
+    #[serde(default)]
     pub categories: HashMap<String, PathBuf>,
     pub servers: Vec<ServerConfig>,
     pub speed_limit: Option<usize>, // bytes/s, None = unlimited
+    #[serde(default = "default_true")]
+    pub cleanup_archives: bool,
+    #[serde(default = "default_true")]
+    pub deobfuscate_filenames: bool,
+    #[serde(default = "default_true")]
+    pub detect_duplicates: bool,
+    #[serde(default)]
+    pub passwords: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -77,11 +93,30 @@ impl Default for Config {
             complete_dir: PathBuf::from("./downloads/complete"),
             download_dir: PathBuf::from("./downloads/incomplete"),
             watch_dir: Some(PathBuf::from("./downloads/watch")),
+            script_dir: None,
+            default_script: None,
             categories,
             servers: Vec::new(),
             speed_limit: None,
+            cleanup_archives: true,
+            deobfuscate_filenames: true,
+            detect_duplicates: true,
+            passwords: Vec::new(),
         }
     }
+}
+
+/// Extracts SABnzbd inline password syntax `Release.Name{{secret}}.nzb` -> `("Release.Name.nzb", Some("secret"))`.
+pub fn extract_nzb_password(name: &str) -> (String, Option<String>) {
+    if let Some(start) = name.find("{{") {
+        if let Some(rel_end) = name[start + 2..].find("}}") {
+            let end = start + 2 + rel_end;
+            let pass = name[start + 2..end].to_string();
+            let cleaned = format!("{}{}", &name[..start], &name[end + 2..]);
+            return (cleaned, if pass.is_empty() { None } else { Some(pass) });
+        }
+    }
+    (name.to_string(), None)
 }
 
 impl Config {
@@ -148,6 +183,10 @@ pub struct QueueItem {
     pub status: JobStatus,
     pub priority: i32,
     pub category: String,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub script: Option<String>,
     pub eta_seconds: Option<u64>,
     pub speed_bps: u64,
     pub time_added: DateTime<Utc>,
@@ -181,5 +220,16 @@ mod tests {
         assert_eq!(created.api_key, loaded.api_key);
         assert_eq!(created.nzb_key, loaded.nzb_key);
         assert_eq!(created.http_port, loaded.http_port);
+    }
+
+    #[test]
+    fn test_extract_nzb_password() {
+        let (clean, pass) = extract_nzb_password("My.Show.S01E01{{s3cr3t}}.nzb");
+        assert_eq!(clean, "My.Show.S01E01.nzb");
+        assert_eq!(pass.as_deref(), Some("s3cr3t"));
+
+        let (clean2, pass2) = extract_nzb_password("Plain.Release.nzb");
+        assert_eq!(clean2, "Plain.Release.nzb");
+        assert_eq!(pass2, None);
     }
 }
