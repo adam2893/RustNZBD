@@ -7,271 +7,315 @@
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Crect x='8' y='8' width='240' height='240' rx='48' fill='%230f172a' stroke='%23334155' stroke-width='8'/%3E%3Crect x='64' y='56' width='128' height='16' rx='4' fill='%23334155'/%3E%3Crect x='64' y='56' width='84' height='16' rx='4' fill='%23f97316'/%3E%3Crect x='64' y='82' width='128' height='16' rx='4' fill='%23334155'/%3E%3Crect x='64' y='82' width='128' height='16' rx='4' fill='%2338bdf8'/%3E%3Cpath d='M112 112 h32 v44 h28 l-44 48 l-44 -48 h28 z' fill='%23f8fafc'/%3E%3Cpath d='M56 184 v20 a8 8 0 0 0 8 8 h128 a8 8 0 0 0 8 -8 v-20 h-16 v12 h-112 v-12 z' fill='%23f97316'/%3E%3C/svg%3E" />
     <style>
         :root {
-            --bg: #0b0f17;
-            --surface: #131924;
-            --surface-2: #1a2230;
-            --border: #263145;
-            --text: #e2e8f0;
-            --muted: #8b9bb4;
-            --rust: #f97316;
-            --rust-hover: #ea580c;
-            --cyan: #38bdf8;
-            --ok: #22c55e;
-            --warn: #f59e0b;
-            --err: #ef4444;
+            --bg: #181818;
+            --nav: #242424;
+            --panel: #212121;
+            --panel-alt: #2a2a2a;
+            --border: #363636;
+            --text: #e5e5e5;
+            --muted: #9a9a9a;
+            --gold: #f5b800;
+            --gold-hover: #d9a300;
+            --green: #4caf50;
+            --red: #e53935;
+            --blue: #29b6f6;
         }
         * { box-sizing: border-box; }
         body {
             margin: 0;
             background: var(--bg);
             color: var(--text);
-            font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
-            font-size: 14px;
-            line-height: 1.45;
+            font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+            font-size: 13px;
         }
-        .topbar {
-            background: var(--surface);
-            border-bottom: 1px solid var(--border);
+        /* Glitter-style top navbar */
+        .navbar {
+            background: var(--nav);
+            border-bottom: 2px solid var(--gold);
             position: sticky;
             top: 0;
-            z-index: 20;
+            z-index: 30;
         }
-        .topbar-inner {
-            max-width: 1120px;
+        .navbar-inner {
+            max-width: 1180px;
             margin: 0 auto;
-            padding: 12px 20px;
+            padding: 0 16px;
+            height: 50px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            gap: 16px;
-            flex-wrap: wrap;
+            gap: 12px;
         }
         .brand {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 9px;
             font-weight: 700;
-            font-size: 17px;
-            letter-spacing: -0.01em;
+            font-size: 16px;
+            color: #fff;
+            cursor: pointer;
         }
-        .nav {
+        .brand span em { font-style: normal; color: var(--gold); }
+        .nav-links {
             display: flex;
+            align-items: center;
             gap: 4px;
-            background: var(--bg);
-            padding: 4px;
-            border-radius: 10px;
-            border: 1px solid var(--border);
+            height: 100%;
         }
-        .nav button {
+        .nav-btn {
             background: transparent;
             border: none;
             color: var(--muted);
-            padding: 6px 14px;
-            border-radius: 7px;
-            font-weight: 600;
+            height: 100%;
+            padding: 0 14px;
             font-size: 13px;
+            font-weight: 600;
             cursor: pointer;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
         }
-        .nav button.active {
-            background: var(--surface-2);
-            color: var(--text);
+        .nav-btn:hover { color: #fff; }
+        .nav-btn.active {
+            color: var(--gold);
+            border-bottom-color: var(--gold);
+            background: rgba(255, 255, 255, 0.03);
         }
-        .nav button:hover:not(.active) { color: var(--text); }
-        .top-actions {
+        .nav-right {
             display: flex;
             align-items: center;
             gap: 10px;
         }
-        .pill {
-            display: inline-flex;
+        .speed-box {
+            display: flex;
             align-items: center;
-            gap: 6px;
-            padding: 4px 10px;
-            border-radius: 999px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 2px 6px;
+            gap: 4px;
+        }
+        .speed-box input {
+            width: 58px;
+            background: transparent;
+            border: none;
+            color: var(--text);
+            font-size: 12px;
+            text-align: right;
+            outline: none;
+        }
+        .status-chip {
             font-size: 12px;
             font-weight: 600;
-            background: var(--surface-2);
+            padding: 4px 10px;
+            border-radius: 4px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+        }
+        .status-chip.dl { border-color: var(--green); color: #81c784; }
+        .status-chip.paused { border-color: var(--gold); color: var(--gold); }
+
+        .btn {
+            background: var(--gold);
+            color: #111;
+            border: none;
+            border-radius: 4px;
+            padding: 6px 12px;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .btn:hover { background: var(--gold-hover); }
+        .btn-dark {
+            background: var(--panel-alt);
+            color: var(--text);
             border: 1px solid var(--border);
         }
-        .dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: var(--muted);
+        .btn-dark:hover { border-color: #666; background: #333; }
+        .btn-xs { padding: 3px 8px; font-size: 11px; }
+        .btn-del {
+            background: transparent;
+            color: #bbb;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 2px 7px;
+            cursor: pointer;
         }
-        .dot.downloading { background: var(--ok); }
-        .dot.paused { background: var(--warn); }
-        .main {
-            max-width: 1120px;
-            margin: 0 auto;
-            padding: 20px;
+        .btn-del:hover { color: #fff; background: var(--red); border-color: var(--red); }
+
+        .container {
+            max-width: 1180px;
+            margin: 18px auto;
+            padding: 0 16px;
             display: grid;
-            gap: 18px;
+            gap: 16px;
         }
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-            gap: 12px;
-        }
-        .stat-card {
-            background: var(--surface);
+        .panel {
+            background: var(--panel);
             border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 14px 16px;
+            border-radius: 5px;
+            overflow: hidden;
         }
-        .stat-label { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-        .stat-val { font-size: 20px; font-weight: 700; color: var(--text); }
-        .card {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 18px 20px;
-        }
-        .card-header {
+        .panel-head {
+            background: var(--panel-alt);
+            padding: 10px 14px;
+            border-bottom: 1px solid var(--border);
             display: flex;
             align-items: center;
             justify-content: space-between;
-            margin-bottom: 14px;
             gap: 10px;
         }
-        h2 { margin: 0; font-size: 15px; font-weight: 600; }
-        .add-bar {
+        .panel-title {
+            font-weight: 700;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: #ddd;
+        }
+        .panel-body { padding: 14px; }
+
+        table { width: 100%; border-collapse: collapse; }
+        th {
+            text-align: left;
+            padding: 9px 12px;
+            font-size: 11px;
+            text-transform: uppercase;
+            color: var(--muted);
+            border-bottom: 1px solid var(--border);
+            background: rgba(0, 0, 0, 0.15);
+        }
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #2c2c2c;
+            vertical-align: middle;
+        }
+        tr:hover td { background: rgba(255, 255, 255, 0.02); }
+        tr:last-child td { border-bottom: none; }
+
+        .prog-wrap {
+            width: 150px;
+            height: 16px;
+            background: #121212;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            position: relative;
+            overflow: hidden;
+        }
+        .prog-fill {
+            height: 100%;
+            background: var(--green);
+            transition: width 0.25s;
+        }
+        .prog-text {
+            position: absolute;
+            inset: 0;
             display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
             align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            font-weight: 700;
+            color: #fff;
+            text-shadow: 0 1px 2px #000;
         }
+        .cat-pill {
+            display: inline-block;
+            padding: 2px 7px;
+            border-radius: 3px;
+            background: #333;
+            color: #ccc;
+            font-size: 11px;
+        }
+        .st-ok { color: #81c784; font-weight: 700; }
+        .st-fail { color: #e57373; font-weight: 700; }
+        .muted { color: var(--muted); font-size: 12px; }
+
+        /* Config sub-tabs */
+        .cfg-layout {
+            display: grid;
+            grid-template-columns: 190px 1fr;
+            gap: 16px;
+        }
+        @media (max-width: 720px) { .cfg-layout { grid-template-columns: 1fr; } }
+        .cfg-menu {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            padding: 6px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            height: fit-content;
+        }
+        .cfg-menu button {
+            background: transparent;
+            border: none;
+            color: var(--muted);
+            text-align: left;
+            padding: 9px 12px;
+            border-radius: 4px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .cfg-menu button.active { background: var(--panel-alt); color: var(--gold); }
+        .cfg-menu button:hover:not(.active) { color: #fff; }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px;
+        }
+        .field { display: flex; flex-direction: column; gap: 5px; }
+        .field label { font-size: 12px; color: var(--muted); font-weight: 600; }
         input[type="text"], input[type="number"], input[type="password"], select {
             background: var(--bg);
             color: var(--text);
             border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 8px 11px;
+            border-radius: 4px;
+            padding: 7px 10px;
             font-size: 13px;
-            outline: none;
         }
-        input:focus, select:focus { border-color: var(--cyan); }
-        .grow { flex: 1; min-width: 220px; }
-        button.btn {
-            background: var(--rust);
-            color: #fff;
-            border: none;
-            border-radius: 8px;
-            padding: 8px 14px;
-            font-size: 13px;
-            font-weight: 600;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-        }
-        button.btn:hover { background: var(--rust-hover); }
-        button.btn-sec {
-            background: var(--surface-2);
-            color: var(--text);
-            border: 1px solid var(--border);
-        }
-        button.btn-sec:hover { border-color: var(--muted); background: var(--surface-2); }
-        button.btn-danger {
-            background: transparent;
-            color: var(--err);
-            border: 1px solid rgba(239, 68, 68, 0.35);
-            padding: 4px 10px;
-            font-size: 12px;
-        }
-        button.btn-danger:hover { background: rgba(239, 68, 68, 0.12); }
-        .file-btn {
-            position: relative;
-            overflow: hidden;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            background: var(--surface-2);
-            border: 1px solid var(--border);
-            color: var(--text);
-            padding: 8px 14px;
-            border-radius: 8px;
-            font-size: 13px;
-            font-weight: 600;
-            cursor: pointer;
-        }
-        .file-btn:hover { border-color: var(--cyan); }
-        .file-btn input[type="file"] {
-            position: absolute;
+        input:focus, select:focus { border-color: var(--gold); outline: none; }
+
+        /* Modal for Add NZB */
+        .modal-backdrop {
+            position: fixed;
             inset: 0;
-            opacity: 0;
-            cursor: pointer;
-        }
-        table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        th {
-            text-align: left;
-            color: var(--muted);
-            font-weight: 600;
-            font-size: 12px;
-            padding: 8px 10px;
-            border-bottom: 1px solid var(--border);
-        }
-        td {
-            padding: 11px 10px;
-            border-bottom: 1px solid rgba(38, 49, 69, 0.55);
-            vertical-align: middle;
-        }
-        tr:last-child td { border-bottom: none; }
-        .progress {
-            width: 120px;
-            height: 7px;
-            background: var(--bg);
-            border-radius: 999px;
-            overflow: hidden;
-            border: 1px solid var(--border);
-        }
-        .progress-bar { height: 100%; background: var(--cyan); transition: width 0.25s; }
-        .badge-status {
-            display: inline-block;
-            padding: 2px 8px;
-            border-radius: 6px;
-            font-size: 11px;
-            font-weight: 600;
-            background: var(--surface-2);
-            color: var(--text);
-        }
-        .badge-status.ok { background: rgba(34, 197, 94, 0.15); color: #4ade80; }
-        .badge-status.err { background: rgba(239, 68, 68, 0.15); color: #f87171; }
-        .badge-status.dl { background: rgba(56, 189, 248, 0.15); color: var(--cyan); }
-        .form-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-            gap: 12px;
-        }
-        .field { display: flex; flex-direction: column; gap: 5px; }
-        .field label { font-size: 12px; color: var(--muted); font-weight: 500; }
-        .checks { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 14px; }
-        .checks label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
-        .server-item {
+            background: rgba(0, 0, 0, 0.7);
             display: flex;
-            justify-content: space-between;
             align-items: center;
-            padding: 10px 14px;
-            background: var(--bg);
+            justify-content: center;
+            z-index: 50;
+            padding: 16px;
+        }
+        .modal {
+            background: var(--panel);
             border: 1px solid var(--border);
-            border-radius: 8px;
-            margin-bottom: 8px;
+            border-top: 3px solid var(--gold);
+            border-radius: 6px;
+            width: 100%;
+            max-width: 520px;
+            overflow: hidden;
         }
-        .muted { color: var(--muted); font-size: 12px; }
-        .toast {
-            font-size: 13px;
-            color: var(--cyan);
-            min-height: 18px;
-            margin-top: 8px;
+        .dropzone {
+            border: 2px dashed var(--border);
+            border-radius: 5px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            margin-bottom: 12px;
+            background: var(--bg);
         }
+        .dropzone:hover, .dropzone.drag { border-color: var(--gold); }
         .hidden { display: none !important; }
+        .msg { font-size: 12px; color: var(--gold); min-height: 16px; margin-top: 8px; }
     </style>
 </head>
 <body>
-    <header class="topbar">
-        <div class="topbar-inner">
-            <div class="brand">
-                <svg width="26" height="26" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+    <header class="navbar">
+        <div class="navbar-inner">
+            <div class="brand" onclick="switchView('main')">
+                <svg width="24" height="24" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
                     <rect x="8" y="8" width="240" height="240" rx="48" fill="#0f172a" stroke="#334155" stroke-width="8"/>
                     <rect x="64" y="56" width="128" height="16" rx="4" fill="#334155"/>
                     <rect x="64" y="56" width="84" height="16" rx="4" fill="#f97316"/>
@@ -280,192 +324,249 @@
                     <path d="M112 112 h32 v44 h28 l-44 48 l-44 -48 h28 z" fill="#f8fafc"/>
                     <path d="M56 184 v20 a8 8 0 0 0 8 8 h128 a8 8 0 0 0 8 -8 v-20 h-16 v12 h-112 v-12 z" fill="#f97316"/>
                 </svg>
-                <span>RustNZBD</span>
+                <span>Rust<em>NZBD</em></span>
             </div>
 
-            <nav class="nav">
-                <button id="tab-downloads" class="active" onclick="switchTab('downloads')">Downloads</button>
-                <button id="tab-servers" onclick="switchTab('servers')">Servers</button>
-                <button id="tab-settings" onclick="switchTab('settings')">Settings</button>
+            <nav class="nav-links">
+                <button id="nav-main" class="nav-btn active" onclick="switchView('main')">Queue &amp; History</button>
+                <button id="nav-stats" class="nav-btn" onclick="switchView('stats')">Status</button>
+                <button id="nav-config" class="nav-btn" onclick="switchView('config')">Config</button>
             </nav>
 
-            <div class="top-actions">
-                <span class="pill">
-                    <span id="statusDot" class="dot"></span>
-                    <span id="statusBadge">Idle</span>
-                    <span id="speedText" class="muted">0 K/s</span>
-                </span>
-                <button id="pauseBtn" class="btn btn-sec" onclick="togglePause()">Pause</button>
+            <div class="nav-right">
+                <span id="statusChip" class="status-chip">Idle · 0 K/s</span>
+                <div class="speed-box" title="Speed limit (KB/s)">
+                    <input id="topSpeed" type="number" placeholder="∞" onchange="setQuickSpeed()" />
+                    <span class="muted">K/s</span>
+                </div>
+                <button id="pauseBtn" class="btn btn-dark" onclick="togglePause()">Pause</button>
+                <button class="btn" onclick="openAddModal()">+ Add NZB</button>
             </div>
         </div>
     </header>
 
-    <main class="main">
-        <!-- DOWNLOADS TAB -->
-        <div id="view-downloads" style="display: grid; gap: 18px;">
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-label">Download Speed</div>
-                    <div id="statSpeed" class="stat-val">0 K/s</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">Remaining</div>
-                    <div id="statLeft" class="stat-val">0.0 MB</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">Active Queue</div>
-                    <div id="statQueue" class="stat-val">0</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">History</div>
-                    <div id="statHist" class="stat-val">0</div>
-                </div>
+    <!-- MAIN QUEUE + HISTORY VIEW -->
+    <div id="view-main" class="container">
+        <section class="panel">
+            <div class="panel-head">
+                <span class="panel-title">Queue (<span id="qCount">0</span>)</span>
+                <span id="qRemaining" class="muted">0.0 MB left</span>
             </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Status</th>
+                        <th>Progress</th>
+                        <th>Remaining / Size</th>
+                        <th>Category</th>
+                        <th style="text-align:right;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="queueBody">
+                    <tr><td colspan="6" class="muted" style="text-align:center;padding:22px;">Queue is empty</td></tr>
+                </tbody>
+            </table>
+        </section>
 
-            <section class="card">
-                <div class="card-header"><h2>Add NZB</h2></div>
-                <div class="add-bar">
-                    <input id="urlInput" class="grow" type="text" placeholder="Paste .nzb or .nzb.gz URL..." />
-                    <input id="catInput" type="text" placeholder="Category" value="default" style="width: 120px;" />
-                    <button class="btn" onclick="addUrl()">Add URL</button>
-                    <label class="file-btn">
-                        <span>Upload .nzb</span>
-                        <input id="fileInput" type="file" accept=".nzb,.gz" onchange="addFile()" />
-                    </label>
-                </div>
-                <div id="feedback" class="toast"></div>
-            </section>
+        <section class="panel">
+            <div class="panel-head">
+                <span class="panel-title">History (<span id="hCount">0</span>)</span>
+                <span id="hTotal" class="muted">0.0 MB</span>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Status</th>
+                        <th>Size</th>
+                        <th>Category</th>
+                        <th>Storage</th>
+                        <th style="text-align:right;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="historyBody">
+                    <tr><td colspan="6" class="muted" style="text-align:center;padding:22px;">No history</td></tr>
+                </tbody>
+            </table>
+        </section>
+    </div>
 
-            <section class="card">
-                <div class="card-header"><h2>Queue</h2></div>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Name</th>
-                            <th>Status</th>
-                            <th>Progress</th>
-                            <th>Remaining</th>
-                            <th>Category</th>
-                            <th style="text-align:right;">Action</th>
-                        </tr>
-                    </thead>
-                    <tbody id="queueBody">
-                        <tr><td colspan="6" class="muted">Queue is empty</td></tr>
-                    </tbody>
-                </table>
-            </section>
+    <!-- STATUS / SERVER STATS VIEW -->
+    <div id="view-stats" class="container hidden">
+        <section class="panel">
+            <div class="panel-head"><span class="panel-title">Server Statistics</span></div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Server</th>
+                        <th>Downloaded</th>
+                        <th>Articles OK</th>
+                        <th>Articles Failed</th>
+                    </tr>
+                </thead>
+                <tbody id="statsBody">
+                    <tr><td colspan="4" class="muted">Loading...</td></tr>
+                </tbody>
+            </table>
+        </section>
+    </div>
 
-            <section class="card">
-                <div class="card-header"><h2>History</h2></div>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Name</th>
-                            <th>Status</th>
-                            <th>Size</th>
-                            <th>Category</th>
-                            <th>Destination</th>
-                            <th style="text-align:right;">Action</th>
-                        </tr>
-                    </thead>
-                    <tbody id="historyBody">
-                        <tr><td colspan="6" class="muted">No completed jobs yet</td></tr>
-                    </tbody>
-                </table>
-            </section>
-        </div>
+    <!-- CONFIG VIEW (GLITTER SIDEBAR STYLE) -->
+    <div id="view-config" class="container hidden">
+        <div class="cfg-layout">
+            <aside class="cfg-menu">
+                <button id="cnav-general" class="active" onclick="switchCfg('general')">General</button>
+                <button id="cnav-servers" onclick="switchCfg('servers')">Servers</button>
+                <button id="cnav-switches" onclick="switchCfg('switches')">Switches</button>
+                <button id="cnav-sorting" onclick="switchCfg('sorting')">Sorting</button>
+                <button id="cnav-notifications" onclick="switchCfg('notifications')">Notifications</button>
+            </aside>
 
-        <!-- SERVERS TAB -->
-        <div id="view-servers" class="hidden" style="display: grid; gap: 18px;">
-            <section class="card">
-                <div class="card-header"><h2>Configured NNTP Servers</h2></div>
-                <div id="serversList" class="muted">No NNTP servers configured.</div>
-            </section>
-
-            <section class="card">
-                <div class="card-header"><h2>Add NNTP Server</h2></div>
-                <div class="form-grid" style="margin-bottom: 14px;">
-                    <div class="field"><label>Name</label><input id="srvName" type="text" value="Primary" /></div>
-                    <div class="field"><label>Host</label><input id="srvHost" type="text" placeholder="news.example.com" /></div>
-                    <div class="field"><label>Port</label><input id="srvPort" type="number" value="563" /></div>
-                    <div class="field"><label>Connections</label><input id="srvConns" type="number" value="8" /></div>
-                    <div class="field"><label>Username</label><input id="srvUser" type="text" placeholder="Optional" /></div>
-                    <div class="field"><label>Password</label><input id="srvPass" type="password" placeholder="Optional" /></div>
-                    <div class="field"><label>SOCKS5 Proxy</label><input id="srvProxy" type="text" placeholder="127.0.0.1:1080" /></div>
-                    <div class="field" style="justify-content: flex-end;">
-                        <label style="display:flex;align-items:center;gap:8px;color:var(--text);padding-bottom:8px;">
-                            <input id="srvSsl" type="checkbox" checked /> Enable TLS / SSL
-                        </label>
-                    </div>
-                </div>
-                <button class="btn" onclick="addServer()">Add Server</button>
-                <div id="srvMsg" class="toast"></div>
-            </section>
-        </div>
-
-        <!-- SETTINGS TAB -->
-        <div id="view-settings" class="hidden" style="display: grid; gap: 18px;">
-            <section class="card">
-                <div class="card-header"><h2>API &amp; Paths</h2></div>
-                <div class="form-grid">
-                    <div class="field">
-                        <label>API Key (Sonarr / Radarr / Prowlarr)</label>
-                        <div style="display:flex;gap:8px;">
-                            <input id="apiKeyDisplay" type="text" readonly class="grow" />
-                            <button class="btn btn-sec" onclick="copyApiKey()">Copy</button>
+            <div>
+                <section id="cfg-general" class="panel">
+                    <div class="panel-head"><span class="panel-title">General</span></div>
+                    <div class="panel-body">
+                        <div class="form-grid">
+                            <div class="field">
+                                <label>API Key</label>
+                                <div style="display:flex;gap:6px;">
+                                    <input id="apiKeyDisplay" type="text" readonly style="flex:1;" />
+                                    <button class="btn btn-dark" onclick="copyApiKey()">Copy</button>
+                                </div>
+                            </div>
+                            <div class="field">
+                                <label>Speed Limit (KB/s)</label>
+                                <input id="setSpeed" type="number" placeholder="Unlimited" />
+                            </div>
                         </div>
                     </div>
-                    <div class="field"><label>Speed Limit (KB/s, empty = unlimited)</label><input id="setSpeed" type="number" placeholder="Unlimited" /></div>
-                </div>
-            </section>
+                </section>
 
-            <section class="card">
-                <div class="card-header"><h2>Post-Processing &amp; Sorting</h2></div>
-                <div class="checks">
-                    <label><input id="setCleanup" type="checkbox" checked /> Cleanup Archives (.par2 / .rar)</label>
-                    <label><input id="setDeobf" type="checkbox" checked /> Deobfuscate Filenames</label>
-                    <label><input id="setDups" type="checkbox" checked /> Detect Duplicates</label>
-                    <label><input id="setTvSort" type="checkbox" /> TV Sorting</label>
-                    <label><input id="setMovieSort" type="checkbox" /> Movie Sorting</label>
-                    <label><input id="setDateSort" type="checkbox" /> Date Sorting</label>
-                </div>
-            </section>
+                <section id="cfg-servers" class="panel hidden">
+                    <div class="panel-head"><span class="panel-title">NNTP Servers</span></div>
+                    <div class="panel-body">
+                        <div id="serversList" style="margin-bottom:16px;"></div>
+                        <div class="form-grid" style="margin-bottom:12px;">
+                            <div class="field"><label>Name</label><input id="srvName" type="text" value="Primary" /></div>
+                            <div class="field"><label>Host</label><input id="srvHost" type="text" placeholder="news.example.com" /></div>
+                            <div class="field"><label>Port</label><input id="srvPort" type="number" value="563" /></div>
+                            <div class="field"><label>Connections</label><input id="srvConns" type="number" value="8" /></div>
+                            <div class="field"><label>Username</label><input id="srvUser" type="text" /></div>
+                            <div class="field"><label>Password</label><input id="srvPass" type="password" /></div>
+                            <div class="field"><label>SOCKS5 Proxy</label><input id="srvProxy" type="text" placeholder="127.0.0.1:1080" /></div>
+                            <div class="field" style="justify-content:flex-end;">
+                                <label style="color:var(--text);display:flex;align-items:center;gap:6px;padding-bottom:6px;">
+                                    <input id="srvSsl" type="checkbox" checked /> SSL / TLS
+                                </label>
+                            </div>
+                        </div>
+                        <button class="btn" onclick="addServer()">Add Server</button>
+                        <div id="srvMsg" class="msg"></div>
+                    </div>
+                </section>
 
-            <section class="card">
-                <div class="card-header"><h2>Notifications (Webhook &amp; SMTP)</h2></div>
-                <div class="form-grid" style="margin-bottom: 14px;">
-                    <div class="field"><label>Webhook URL (Discord / Slack / Apprise)</label><input id="setWebhook" type="text" placeholder="https://..." /></div>
-                    <div class="field"><label>SMTP Host</label><input id="setSmtpHost" type="text" placeholder="smtp.example.com" /></div>
-                    <div class="field"><label>SMTP Port</label><input id="setSmtpPort" type="number" value="587" /></div>
-                    <div class="field"><label>From Email</label><input id="setSmtpFrom" type="text" placeholder="rustnzbd@example.com" /></div>
-                    <div class="field"><label>To Email</label><input id="setSmtpTo" type="text" placeholder="you@example.com" /></div>
-                </div>
-                <button class="btn" onclick="saveSettings()">Save Settings</button>
-                <div id="settingsMsg" class="toast"></div>
-            </section>
+                <section id="cfg-switches" class="panel hidden">
+                    <div class="panel-head"><span class="panel-title">Switches</span></div>
+                    <div class="panel-body" style="display:grid;gap:10px;">
+                        <label><input id="setCleanup" type="checkbox" checked /> Cleanup Archives (.par2 / .rar after unpack)</label>
+                        <label><input id="setDeobf" type="checkbox" checked /> Deobfuscate Hashed Filenames</label>
+                        <label><input id="setDups" type="checkbox" checked /> Detect Duplicate NZBs</label>
+                        <div><button class="btn" onclick="saveSettings()">Save Changes</button></div>
+                    </div>
+                </section>
+
+                <section id="cfg-sorting" class="panel hidden">
+                    <div class="panel-head"><span class="panel-title">Sorting</span></div>
+                    <div class="panel-body" style="display:grid;gap:10px;">
+                        <label><input id="setTvSort" type="checkbox" /> Enable TV Sorting</label>
+                        <label><input id="setMovieSort" type="checkbox" /> Enable Movie Sorting</label>
+                        <label><input id="setDateSort" type="checkbox" /> Enable Date Sorting</label>
+                        <div><button class="btn" onclick="saveSettings()">Save Changes</button></div>
+                    </div>
+                </section>
+
+                <section id="cfg-notifications" class="panel hidden">
+                    <div class="panel-head"><span class="panel-title">Notifications</span></div>
+                    <div class="panel-body">
+                        <div class="form-grid" style="margin-bottom:12px;">
+                            <div class="field"><label>Webhook URL</label><input id="setWebhook" type="text" placeholder="https://..." /></div>
+                            <div class="field"><label>SMTP Host</label><input id="setSmtpHost" type="text" /></div>
+                            <div class="field"><label>SMTP Port</label><input id="setSmtpPort" type="number" value="587" /></div>
+                            <div class="field"><label>From Email</label><input id="setSmtpFrom" type="text" /></div>
+                            <div class="field"><label>To Email</label><input id="setSmtpTo" type="text" /></div>
+                        </div>
+                        <button class="btn" onclick="saveSettings()">Save Changes</button>
+                    </div>
+                </section>
+
+                <div id="settingsMsg" class="msg"></div>
+            </div>
         </div>
-    </main>
+    </div>
+
+    <!-- ADD NZB MODAL -->
+    <div id="addModal" class="modal-backdrop hidden" onclick="if(event.target===this)closeAddModal()">
+        <div class="modal">
+            <div class="panel-head">
+                <span class="panel-title">Add NZB</span>
+                <button class="btn-del" onclick="closeAddModal()">✕</button>
+            </div>
+            <div class="panel-body">
+                <div id="dropzone" class="dropzone" onclick="document.getElementById('fileInput').click()">
+                    <div style="font-weight:600;margin-bottom:4px;">Drop .nzb / .nzb.gz here or click to browse</div>
+                    <div class="muted">Supports gzipped NZBs and {{password}} filenames</div>
+                    <input id="fileInput" type="file" accept=".nzb,.gz" class="hidden" onchange="addFile()" />
+                </div>
+                <div class="form-grid" style="margin-bottom:12px;">
+                    <div class="field" style="grid-column:1 / -1;"><label>Or Fetch from URL</label><input id="urlInput" type="text" placeholder="https://..." /></div>
+                    <div class="field"><label>Category</label><input id="catInput" type="text" value="default" /></div>
+                </div>
+                <div style="display:flex;justify-content:flex-end;gap:8px;">
+                    <button class="btn btn-dark" onclick="closeAddModal()">Cancel</button>
+                    <button class="btn" onclick="addUrl()">Add URL</button>
+                </div>
+                <div id="feedback" class="msg"></div>
+            </div>
+        </div>
+    </div>
 
     <script>
         const API_KEY = "__RUSTNZBD_API_KEY__";
         let isPaused = false;
         document.getElementById('apiKeyDisplay').value = API_KEY;
 
-        function switchTab(tab) {
-            for (const name of ['downloads', 'servers', 'settings']) {
-                document.getElementById(`view-${name}`).classList.toggle('hidden', name !== tab);
-                document.getElementById(`tab-${name}`).classList.toggle('active', name === tab);
+        function switchView(view) {
+            for (const v of ['main', 'stats', 'config']) {
+                document.getElementById(`view-${v}`).classList.toggle('hidden', v !== view);
+                document.getElementById(`nav-${v}`).classList.toggle('active', v === view);
             }
-            if (tab !== 'downloads') refreshConfig();
+            if (view === 'stats') refreshStats();
+            if (view === 'config') refreshConfig();
         }
+
+        function switchCfg(tab) {
+            for (const t of ['general', 'servers', 'switches', 'sorting', 'notifications']) {
+                document.getElementById(`cfg-${t}`).classList.toggle('hidden', t !== tab);
+                document.getElementById(`cnav-${t}`).classList.toggle('active', t === tab);
+            }
+        }
+
+        function openAddModal() { document.getElementById('addModal').classList.remove('hidden'); }
+        function closeAddModal() { document.getElementById('addModal').classList.add('hidden'); }
+
+        const dz = document.getElementById('dropzone');
+        dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag'); });
+        dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
+        dz.addEventListener('drop', e => {
+            e.preventDefault();
+            dz.classList.remove('drag');
+            if (e.dataTransfer.files.length) uploadNzbFile(e.dataTransfer.files[0]);
+        });
 
         function copyApiKey() {
             navigator.clipboard.writeText(API_KEY);
-            document.getElementById('settingsMsg').textContent = 'API key copied to clipboard';
-        }
-
-        function setMsg(id, text) {
-            document.getElementById(id).textContent = text;
+            document.getElementById('settingsMsg').textContent = 'API key copied';
         }
 
         async function apiCall(params, options = {}) {
@@ -479,29 +580,37 @@
             const q = data.queue;
             isPaused = q.paused;
 
-            document.getElementById('statusBadge').textContent = q.status;
-            document.getElementById('speedText').textContent = `${q.speed}/s`;
-            document.getElementById('statSpeed').textContent = `${q.speed}/s`;
-            document.getElementById('statLeft').textContent = q.sizeleft;
-            document.getElementById('statQueue').textContent = q.slots.length;
+            const chip = document.getElementById('statusChip');
+            chip.textContent = `${q.status} · ${q.speed}/s`;
+            chip.className = 'status-chip' + (isPaused ? ' paused' : (q.status === 'Downloading' ? ' dl' : ''));
             document.getElementById('pauseBtn').textContent = isPaused ? 'Resume' : 'Pause';
-
-            const dot = document.getElementById('statusDot');
-            dot.className = 'dot' + (isPaused ? ' paused' : (q.status === 'Downloading' ? ' downloading' : ''));
+            document.getElementById('qCount').textContent = q.slots.length;
+            document.getElementById('qRemaining').textContent = `${q.sizeleft} left`;
+            if (document.activeElement !== document.getElementById('topSpeed')) {
+                document.getElementById('topSpeed').value = q.speedlimit || '';
+            }
 
             const body = document.getElementById('queueBody');
             if (!q.slots.length) {
-                body.innerHTML = '<tr><td colspan="6" class="muted">Queue is empty</td></tr>';
+                body.innerHTML = '<tr><td colspan="6" class="muted" style="text-align:center;padding:22px;">Queue is empty</td></tr>';
                 return;
             }
             body.innerHTML = q.slots.map(s => `
                 <tr>
-                    <td><strong>${escapeHtml(s.filename)}</strong></td>
-                    <td><span class="badge-status dl">${escapeHtml(s.status)}</span></td>
-                    <td><div class="progress"><div class="progress-bar" style="width:${s.percentage}%"></div></div></td>
-                    <td>${escapeHtml(s.sizeleft)} / ${escapeHtml(s.size)}</td>
-                    <td>${escapeHtml(s.cat)}</td>
-                    <td style="text-align:right;"><button class="btn btn-danger" onclick="deleteQueue('${s.nzo_id}')">Delete</button></td>
+                    <td><strong>${esc(s.filename)}</strong></td>
+                    <td>${esc(s.status)}</td>
+                    <td>
+                        <div class="prog-wrap">
+                            <div class="prog-fill" style="width:${s.percentage}%"></div>
+                            <div class="prog-text">${s.percentage}%</div>
+                        </div>
+                    </td>
+                    <td>${esc(s.sizeleft)} / ${esc(s.size)}</td>
+                    <td><span class="cat-pill">${esc(s.cat)}</span></td>
+                    <td style="text-align:right;white-space:nowrap;">
+                        <button class="btn btn-dark btn-xs" onclick="jobAction('${s.status === 'Paused' ? 'resume' : 'pause'}','${s.nzo_id}')">${s.status === 'Paused' ? '▶' : '⏸'}</button>
+                        <button class="btn-del" onclick="deleteQueue('${s.nzo_id}')">✕</button>
+                    </td>
                 </tr>
             `).join('');
         }
@@ -509,46 +618,57 @@
         async function refreshHistory() {
             const data = await apiCall('mode=history');
             if (data.error) return;
-            const slots = data.history.slots;
-            document.getElementById('statHist').textContent = slots.length;
+            const h = data.history;
+            document.getElementById('hCount').textContent = h.slots.length;
+            document.getElementById('hTotal').textContent = h.total_size;
             const body = document.getElementById('historyBody');
-            if (!slots.length) {
-                body.innerHTML = '<tr><td colspan="6" class="muted">No completed jobs yet</td></tr>';
+            if (!h.slots.length) {
+                body.innerHTML = '<tr><td colspan="6" class="muted" style="text-align:center;padding:22px;">No history</td></tr>';
                 return;
             }
-            body.innerHTML = slots.map(s => {
-                const ok = s.status === 'Completed';
-                return `
+            body.innerHTML = h.slots.map(s => `
                 <tr>
-                    <td><strong>${escapeHtml(s.name)}</strong></td>
-                    <td><span class="badge-status ${ok ? 'ok' : 'err'}">${escapeHtml(s.status)}</span></td>
-                    <td>${escapeHtml(s.size)}</td>
-                    <td>${escapeHtml(s.category)}</td>
-                    <td class="muted">${escapeHtml(s.storage || s.fail_message || '')}</td>
-                    <td style="text-align:right;"><button class="btn btn-danger" onclick="deleteHistory('${s.nzo_id}')">Delete</button></td>
-                </tr>`;
-            }).join('');
+                    <td><strong>${esc(s.name)}</strong></td>
+                    <td><span class="${s.status === 'Completed' ? 'st-ok' : 'st-fail'}">${esc(s.status)}</span></td>
+                    <td>${esc(s.size)}</td>
+                    <td><span class="cat-pill">${esc(s.category)}</span></td>
+                    <td class="muted">${esc(s.storage || s.fail_message || '')}</td>
+                    <td style="text-align:right;"><button class="btn-del" onclick="deleteHistory('${s.nzo_id}')">✕</button></td>
+                </tr>
+            `).join('');
+        }
+
+        async function refreshStats() {
+            const data = await apiCall('mode=server_stats');
+            const body = document.getElementById('statsBody');
+            const entries = Object.entries(data.servers || {});
+            if (!entries.length) {
+                body.innerHTML = '<tr><td colspan="4" class="muted">No server transfer stats recorded yet.</td></tr>';
+                return;
+            }
+            body.innerHTML = entries.map(([name, st]) => `
+                <tr>
+                    <td><strong>${esc(name)}</strong></td>
+                    <td>${(st.bytes_downloaded / 1048576).toFixed(2)} MB</td>
+                    <td>${st.articles_ok}</td>
+                    <td>${st.articles_failed}</td>
+                </tr>
+            `).join('');
         }
 
         async function refreshConfig() {
             const data = await apiCall('mode=get_config');
             if (data.error || !data.config) return;
             const cfg = data.config;
-            const servers = cfg.servers || [];
             const el = document.getElementById('serversList');
-            if (!servers.length) {
-                el.innerHTML = '<span class="muted">No NNTP servers configured.</span>';
-            } else {
-                el.innerHTML = servers.map((s, idx) => `
-                    <div class="server-item">
-                        <div>
-                            <strong>${escapeHtml(s.name)}</strong>
-                            <span class="muted"> — ${escapeHtml(s.host)}:${s.port} · ${s.ssl ? 'TLS' : 'Plain'} · ${s.connections} conns · priority ${s.priority}</span>
-                        </div>
-                        <button class="btn btn-danger" onclick="deleteServer(${idx})">Remove</button>
-                    </div>
-                `).join('');
-            }
+            const servers = cfg.servers || [];
+            el.innerHTML = servers.length ? servers.map((s, idx) => `
+                <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;margin-bottom:6px;">
+                    <div><strong>${esc(s.name)}</strong> <span class="muted">(${esc(s.host)}:${s.port}, ${s.ssl ? 'SSL' : 'Plain'}, ${s.connections} conns)</span></div>
+                    <button class="btn-del" onclick="deleteServer(${idx})">✕</button>
+                </div>
+            `).join('') : '<div class="muted">No servers configured.</div>';
+
             document.getElementById('setCleanup').checked = !!cfg.cleanup_archives;
             document.getElementById('setDeobf').checked = !!cfg.deobfuscate_filenames;
             document.getElementById('setDups').checked = !!cfg.detect_duplicates;
@@ -563,8 +683,19 @@
             document.getElementById('setSmtpTo').value = (cfg.notifications && cfg.notifications.smtp_to) || '';
         }
 
+        async function setQuickSpeed() {
+            const val = document.getElementById('topSpeed').value.trim();
+            await apiCall(`mode=config&name=speedlimit&value=${encodeURIComponent(val || '0')}`);
+            refreshQueue();
+        }
+
         async function togglePause() {
             await apiCall(isPaused ? 'mode=resume' : 'mode=pause');
+            refreshQueue();
+        }
+
+        async function jobAction(act, id) {
+            await apiCall(`mode=queue&name=${act}&value=${encodeURIComponent(id)}`);
             refreshQueue();
         }
 
@@ -572,25 +703,28 @@
             const url = document.getElementById('urlInput').value.trim();
             const cat = document.getElementById('catInput').value.trim() || 'default';
             if (!url) return;
-            setMsg('feedback', 'Fetching NZB...');
+            document.getElementById('feedback').textContent = 'Fetching NZB...';
             const res = await apiCall(`mode=addurl&name=${encodeURIComponent(url)}&cat=${encodeURIComponent(cat)}`);
-            setMsg('feedback', res.status ? `Added: ${res.nzo_ids.join(', ')}` : `Error: ${res.error}`);
-            if (res.status) document.getElementById('urlInput').value = '';
+            document.getElementById('feedback').textContent = res.status ? `Added ${res.nzo_ids.join(', ')}` : `Error: ${res.error}`;
+            if (res.status) { document.getElementById('urlInput').value = ''; closeAddModal(); }
             refreshQueue();
         }
 
         async function addFile() {
             const input = document.getElementById('fileInput');
-            const file = input.files[0];
+            if (input.files.length) await uploadNzbFile(input.files[0]);
+            input.value = '';
+        }
+
+        async function uploadNzbFile(file) {
             const cat = document.getElementById('catInput').value.trim() || 'default';
-            if (!file) return;
             const buf = await file.arrayBuffer();
             const res = await apiCall(`mode=addfile&nzbname=${encodeURIComponent(file.name)}&cat=${encodeURIComponent(cat)}`, {
                 method: 'POST',
                 body: buf
             });
-            setMsg('feedback', res.status ? `Added: ${res.nzo_ids.join(', ')}` : `Error: ${res.error}`);
-            input.value = '';
+            document.getElementById('feedback').textContent = res.status ? `Added ${res.nzo_ids.join(', ')}` : `Error: ${res.error}`;
+            if (res.status) closeAddModal();
             refreshQueue();
         }
 
@@ -604,18 +738,13 @@
                 password: document.getElementById('srvPass').value || null,
                 connections: parseInt(document.getElementById('srvConns').value, 10) || 8,
                 socks5_proxy: document.getElementById('srvProxy').value.trim() || null,
-                retention: 0,
-                priority: 0,
-                enable: true,
-                optional: false
+                retention: 0, priority: 0, enable: true, optional: false
             };
-            if (!payload.host) return setMsg('srvMsg', 'Server host required');
+            if (!payload.host) return (document.getElementById('srvMsg').textContent = 'Host required');
             const res = await apiCall('mode=add_server', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
             });
-            setMsg('srvMsg', res.status ? 'Server added' : `Error: ${res.error}`);
+            document.getElementById('srvMsg').textContent = res.status ? 'Server added' : `Error: ${res.error}`;
             refreshConfig();
         }
 
@@ -638,8 +767,7 @@
                 },
                 notifications: {
                     webhook_url: document.getElementById('setWebhook').value.trim() || null,
-                    notify_on_complete: true,
-                    notify_on_fail: true,
+                    notify_on_complete: true, notify_on_fail: true,
                     smtp_host: document.getElementById('setSmtpHost').value.trim() || null,
                     smtp_port: parseInt(document.getElementById('setSmtpPort').value, 10) || 587,
                     smtp_from: document.getElementById('setSmtpFrom').value.trim() || null,
@@ -647,32 +775,19 @@
                 }
             };
             const res = await apiCall('mode=save_settings', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
             });
-            setMsg('settingsMsg', res.status ? 'Settings saved' : `Error: ${res.error}`);
+            document.getElementById('settingsMsg').textContent = res.status ? 'Settings saved' : `Error: ${res.error}`;
         }
 
-        async function deleteQueue(id) {
-            await apiCall(`mode=queue&name=delete&value=${encodeURIComponent(id)}`);
-            refreshQueue();
-        }
-
-        async function deleteHistory(id) {
-            await apiCall(`mode=history&name=delete&value=${encodeURIComponent(id)}`);
-            refreshHistory();
-        }
-
-        function escapeHtml(str) {
-            return String(str).replace(/[&<>"']/g, c => ({
-                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-            }[c]));
+        async function deleteQueue(id) { await apiCall(`mode=queue&name=delete&value=${encodeURIComponent(id)}`); refreshQueue(); }
+        async function deleteHistory(id) { await apiCall(`mode=history&name=delete&value=${encodeURIComponent(id)}`); refreshHistory(); }
+        function esc(str) {
+            return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
         }
 
         refreshQueue();
         refreshHistory();
-        refreshConfig();
         setInterval(() => { refreshQueue(); refreshHistory(); }, 2000);
     </script>
 </body>
