@@ -5,6 +5,8 @@ use sabnzbd_core::{NotificationConfig, RssFeedConfig, ScheduleAction, ScheduleRu
 use serde_json::json;
 use std::collections::HashSet;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
 use tracing::{info, warn};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,7 +195,7 @@ impl Scheduler {
 pub struct Notifier;
 
 impl Notifier {
-    /// Sends a JSON webhook notification (compatible with Discord/Slack/custom endpoints).
+    /// Dispatches both webhook and SMTP email notifications if configured.
     pub async fn notify(
         cfg: &NotificationConfig,
         completed: bool,
@@ -206,33 +208,127 @@ impl Notifier {
         } else {
             cfg.notify_on_fail
         };
-        let Some(url) = &cfg.webhook_url else {
-            return;
-        };
-        if !should_send || url.trim().is_empty() {
+        if !should_send {
             return;
         }
 
         let status = if completed { "Completed" } else { "Failed" };
-        let payload = json!({
-            "content": format!("RustNZBD: {job_name} [{category}] -> {status}"),
-            "event": status,
-            "name": job_name,
-            "category": category,
-            "detail": detail.unwrap_or("")
-        });
 
-        if let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(10)).build() {
-            if let Err(e) = client
-                .post(url)
-                .header("Content-Type", "application/json")
-                .body(payload.to_string())
-                .send()
-                .await
-            {
-                warn!("Webhook notification failed: {}", e);
+        if let Some(url) = cfg.webhook_url.as_deref().filter(|u| !u.trim().is_empty()) {
+            let payload = json!({
+                "content": format!("RustNZBD: {job_name} [{category}] -> {status}"),
+                "event": status,
+                "name": job_name,
+                "category": category,
+                "detail": detail.unwrap_or("")
+            });
+
+            if let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(10)).build() {
+                if let Err(e) = client
+                    .post(url)
+                    .header("Content-Type", "application/json")
+                    .body(payload.to_string())
+                    .send()
+                    .await
+                {
+                    warn!("Webhook notification failed: {}", e);
+                }
             }
         }
+
+        if cfg.smtp_host.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+            if let Err(e) = Self::send_smtp(cfg, status, job_name, category, detail).await {
+                warn!("SMTP notification failed: {}", e);
+            }
+        }
+    }
+
+    pub async fn send_smtp(
+        cfg: &NotificationConfig,
+        status: &str,
+        job_name: &str,
+        category: &str,
+        detail: Option<&str>,
+    ) -> Result<(), String> {
+        let host = cfg.smtp_host.as_deref().ok_or("Missing smtp_host")?;
+        let from = cfg.smtp_from.as_deref().ok_or("Missing smtp_from")?;
+        let to = cfg.smtp_to.as_deref().ok_or("Missing smtp_to")?;
+
+        let stream = TcpStream::connect(format!("{host}:{}", cfg.smtp_port))
+            .await
+            .map_err(|e| e.to_string())?;
+        let (r, mut w) = stream.into_split();
+        let mut reader = BufReader::new(r);
+
+        Self::expect_smtp(&mut reader, "220").await?;
+        w.write_all(b"EHLO rustnzbd\r\n").await.map_err(|e| e.to_string())?;
+        Self::expect_smtp(&mut reader, "250").await?;
+
+        if let (Some(user), Some(pass)) = (&cfg.smtp_user, &cfg.smtp_password) {
+            if !user.is_empty() {
+                w.write_all(b"AUTH LOGIN\r\n").await.map_err(|e| e.to_string())?;
+                Self::expect_smtp(&mut reader, "334").await?;
+                let u_b64 = Self::b64(user.as_bytes());
+                w.write_all(format!("{u_b64}\r\n").as_bytes()).await.map_err(|e| e.to_string())?;
+                Self::expect_smtp(&mut reader, "334").await?;
+                let p_b64 = Self::b64(pass.as_bytes());
+                w.write_all(format!("{p_b64}\r\n").as_bytes()).await.map_err(|e| e.to_string())?;
+                Self::expect_smtp(&mut reader, "235").await?;
+            }
+        }
+
+        w.write_all(format!("MAIL FROM:<{from}>\r\n").as_bytes()).await.map_err(|e| e.to_string())?;
+        Self::expect_smtp(&mut reader, "250").await?;
+        w.write_all(format!("RCPT TO:<{to}>\r\n").as_bytes()).await.map_err(|e| e.to_string())?;
+        Self::expect_smtp(&mut reader, "250").await?;
+        w.write_all(b"DATA\r\n").await.map_err(|e| e.to_string())?;
+        Self::expect_smtp(&mut reader, "354").await?;
+
+        let body = format!(
+            "From: <{from}>\r\nTo: <{to}>\r\nSubject: RustNZBD: {job_name} [{status}]\r\n\r\nJob: {job_name}\r\nCategory: {category}\r\nStatus: {status}\r\nDetail: {}\r\n.\r\n",
+            detail.unwrap_or("")
+        );
+        w.write_all(body.as_bytes()).await.map_err(|e| e.to_string())?;
+        Self::expect_smtp(&mut reader, "250").await?;
+        let _ = w.write_all(b"QUIT\r\n").await;
+        Ok(())
+    }
+
+    async fn expect_smtp(
+        reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+        code: &str,
+    ) -> Result<(), String> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = reader.read_line(&mut line).await.map_err(|e| e.to_string())?;
+            if n == 0 {
+                return Err("Unexpected EOF from SMTP server".to_string());
+            }
+            if !line.starts_with(code) {
+                return Err(format!("SMTP expected {code}, got: {}", line.trim()));
+            }
+            // Multi-line SMTP replies have '-' at index 3 (e.g. "250-...")
+            if line.as_bytes().get(3) != Some(&b'-') {
+                return Ok(());
+            }
+        }
+    }
+
+    fn b64(input: &[u8]) -> String {
+        const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in input.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+            let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+            let n = (b0 << 16) | (b1 << 8) | b2;
+            out.push(TBL[((n >> 18) & 63) as usize] as char);
+            out.push(TBL[((n >> 12) & 63) as usize] as char);
+            out.push(if chunk.len() > 1 { TBL[((n >> 6) & 63) as usize] as char } else { '=' });
+            out.push(if chunk.len() > 2 { TBL[(n & 63) as usize] as char } else { '=' });
+        }
+        out
     }
 }
 
@@ -282,5 +378,50 @@ mod tests {
 
         let same_min = Local.with_ymd_and_hms(2026, 11, 20, 23, 30, 45).unwrap();
         assert!(sched.due_actions(&rules, same_min).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_smtp_email_notification() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let (r, mut w) = sock.into_split();
+            let mut reader = BufReader::new(r);
+            w.write_all(b"220 mock.smtp Ready\r\n").await.unwrap();
+            let mut line = String::new();
+            let mut in_data = false;
+            while reader.read_line(&mut line).await.unwrap() > 0 {
+                let cmd = line.trim();
+                if in_data {
+                    if cmd == "." {
+                        in_data = false;
+                        w.write_all(b"250 Queued\r\n").await.unwrap();
+                    }
+                } else if cmd.starts_with("EHLO") || cmd.starts_with("MAIL FROM") || cmd.starts_with("RCPT TO") {
+                    w.write_all(b"250 Ok\r\n").await.unwrap();
+                } else if cmd == "DATA" {
+                    in_data = true;
+                    w.write_all(b"354 End data with .\r\n").await.unwrap();
+                } else if cmd == "QUIT" {
+                    w.write_all(b"221 Bye\r\n").await.unwrap();
+                    break;
+                }
+                line.clear();
+            }
+        });
+
+        let cfg = NotificationConfig {
+            smtp_host: Some("127.0.0.1".to_string()),
+            smtp_port: port,
+            smtp_from: Some("rustnzbd@example.com".to_string()),
+            smtp_to: Some("adam@example.com".to_string()),
+            ..Default::default()
+        };
+
+        Notifier::send_smtp(&cfg, "Completed", "ubuntu.nzb", "linux", None)
+            .await
+            .unwrap();
     }
 }

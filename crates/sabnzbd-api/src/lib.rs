@@ -358,7 +358,91 @@ async fn handle_api_json(
                     s.password = Some("********".to_string());
                 }
             }
+            if cfg.notifications.smtp_password.is_some() {
+                cfg.notifications.smtp_password = Some("********".to_string());
+            }
             json!({ "config": cfg })
+        }
+
+        "save_settings" => {
+            let Some(raw_body) = body else {
+                return json!({ "status": false, "error": "Missing settings JSON" });
+            };
+            let patch: Value = match serde_json::from_slice(&raw_body) {
+                Ok(v) => v,
+                Err(e) => return json!({ "status": false, "error": format!("Invalid JSON: {e}") }),
+            };
+            {
+                let mut cfg = state.config.write();
+                if let Some(v) = patch.get("cleanup_archives").and_then(|x| x.as_bool()) {
+                    cfg.cleanup_archives = v;
+                }
+                if let Some(v) = patch.get("deobfuscate_filenames").and_then(|x| x.as_bool()) {
+                    cfg.deobfuscate_filenames = v;
+                }
+                if let Some(v) = patch.get("detect_duplicates").and_then(|x| x.as_bool()) {
+                    cfg.detect_duplicates = v;
+                }
+                if let Some(v) = patch.get("speed_limit") {
+                    cfg.speed_limit = v.as_u64().map(|n| n as usize);
+                }
+                if let Some(v) = patch.get("passwords") {
+                    if let Ok(pw) = serde_json::from_value(v.clone()) {
+                        cfg.passwords = pw;
+                    }
+                }
+                if let Some(v) = patch.get("categories") {
+                    if let Ok(cats) = serde_json::from_value(v.clone()) {
+                        cfg.categories = cats;
+                    }
+                }
+                if let Some(v) = patch.get("sorting") {
+                    if let Ok(sorting) = serde_json::from_value(v.clone()) {
+                        cfg.sorting = sorting;
+                    }
+                }
+                if let Some(v) = patch.get("notifications") {
+                    let prev_pass = cfg.notifications.smtp_password.clone();
+                    if let Ok(mut notif) = serde_json::from_value::<sabnzbd_core::NotificationConfig>(v.clone()) {
+                        if notif.smtp_password.as_deref() == Some("********") {
+                            notif.smtp_password = prev_pass;
+                        }
+                        cfg.notifications = notif;
+                    }
+                }
+                if let Some(v) = patch.get("rss_feeds") {
+                    if let Ok(feeds) = serde_json::from_value(v.clone()) {
+                        cfg.rss_feeds = feeds;
+                    }
+                }
+                if let Some(v) = patch.get("schedules") {
+                    if let Ok(scheds) = serde_json::from_value(v.clone()) {
+                        cfg.schedules = scheds;
+                    }
+                }
+                if let Some(path) = &state.config_path {
+                    if let Err(e) = cfg.save(path) {
+                        warn!("Failed saving config to {:?}: {}", path, e);
+                    }
+                }
+            }
+            json!({ "status": true })
+        }
+
+        "delete_server" => {
+            let idx = query.value.as_deref().and_then(|v| v.parse::<usize>().ok());
+            let mut removed = false;
+            if let Some(i) = idx {
+                let mut cfg = state.config.write();
+                if i < cfg.servers.len() {
+                    cfg.servers.remove(i);
+                    removed = true;
+                    if let Some(path) = &state.config_path {
+                        let _ = cfg.save(path);
+                    }
+                }
+            }
+            json!({ "status": removed })
         }
 
         "add_server" => {

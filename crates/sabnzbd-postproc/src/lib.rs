@@ -1,3 +1,4 @@
+use sabnzbd_core::SortingConfig;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -309,6 +310,182 @@ impl PostProcessor {
     }
 }
 
+/// SABnzbd-compatible TV / Date / Movie media sorter.
+pub struct Sorter;
+
+impl Sorter {
+    /// Computes a relative sorted path (without extension) from `job_name` and `SortingConfig`.
+    pub fn compute_sorted_relpath(job_name: &str, cfg: &SortingConfig) -> Option<PathBuf> {
+        let clean = job_name.trim_end_matches(".nzb").trim_end_matches(".NZB");
+        let tokens: Vec<&str> = clean
+            .split(|c: char| matches!(c, '.' | ' ' | '_'))
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if cfg.enable_tv_sorting {
+            if let Some((idx, season, episode)) = Self::find_tv_ep(&tokens) {
+                let show = Self::title_case(&tokens[..idx].join(" "));
+                if !show.is_empty() {
+                    let rendered = cfg
+                        .tv_sort_string
+                        .replace("{show}", &show)
+                        .replace("{season:02}", &format!("{season:02}"))
+                        .replace("{episode:02}", &format!("{episode:02}"))
+                        .replace("{season}", &season.to_string())
+                        .replace("{episode}", &episode.to_string());
+                    return Some(PathBuf::from(rendered));
+                }
+            }
+        }
+
+        if cfg.enable_date_sorting {
+            if let Some((idx, y, m, d)) = Self::find_date(&tokens) {
+                let show = Self::title_case(&tokens[..idx].join(" "));
+                if !show.is_empty() {
+                    let rendered = cfg
+                        .date_sort_string
+                        .replace("{show}", &show)
+                        .replace("{year}", &format!("{y:04}"))
+                        .replace("{month:02}", &format!("{m:02}"))
+                        .replace("{day:02}", &format!("{d:02}"));
+                    return Some(PathBuf::from(rendered));
+                }
+            }
+        }
+
+        if cfg.enable_movie_sorting {
+            if let Some((idx, year)) = Self::find_movie_year(&tokens) {
+                let title = Self::title_case(&tokens[..idx].join(" "));
+                if !title.is_empty() {
+                    let rendered = cfg
+                        .movie_sort_string
+                        .replace("{title}", &title)
+                        .replace("{year}", &year.to_string());
+                    return Some(PathBuf::from(rendered));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Moves/renames the largest file in `dir` according to `SortingConfig` relative to `dest_root`.
+    pub async fn sort_media_file(
+        dir: &Path,
+        dest_root: &Path,
+        job_name: &str,
+        cfg: &SortingConfig,
+    ) -> Result<Option<PathBuf>, PostProcError> {
+        let Some(rel) = Self::compute_sorted_relpath(job_name, cfg) else {
+            return Ok(None);
+        };
+
+        let mut largest: Option<(u64, PathBuf, String)> = None;
+        let mut entries = tokio::fs::read_dir(dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.is_file() {
+                let meta = entry.metadata().await?;
+                let ext = path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if largest.as_ref().map(|(sz, _, _)| meta.len() > *sz).unwrap_or(true) {
+                    largest = Some((meta.len(), path, ext));
+                }
+            }
+        }
+
+        let Some((_, src, ext)) = largest else {
+            return Ok(None);
+        };
+        let mut target = dest_root.join(rel);
+        if !ext.is_empty() {
+            target.set_extension(ext);
+        }
+        if let Some(parent) = target.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        if tokio::fs::rename(&src, &target).await.is_err() {
+            tokio::fs::copy(&src, &target).await?;
+            let _ = tokio::fs::remove_file(&src).await;
+        }
+        Ok(Some(target))
+    }
+
+    fn find_tv_ep(tokens: &[&str]) -> Option<(usize, u32, u32)> {
+        for (i, tok) in tokens.iter().enumerate() {
+            let lower = tok.to_ascii_lowercase();
+            if let Some(rest) = lower.strip_prefix('s') {
+                if let Some((s_str, e_str)) = rest.split_once('e') {
+                    let e_digits: String = e_str.chars().take_while(|c| c.is_ascii_digit()).collect();
+                    if let (Ok(s), Ok(e)) = (s_str.parse::<u32>(), e_digits.parse::<u32>()) {
+                        return Some((i, s, e));
+                    }
+                }
+            }
+            if let Some((s_str, e_str)) = lower.split_once('x') {
+                if !s_str.is_empty() && !e_str.is_empty() && s_str.chars().all(|c| c.is_ascii_digit()) && e_str.chars().all(|c| c.is_ascii_digit()) {
+                    if let (Ok(s), Ok(e)) = (s_str.parse::<u32>(), e_str.parse::<u32>()) {
+                        return Some((i, s, e));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn find_date(tokens: &[&str]) -> Option<(usize, u32, u32, u32)> {
+        for i in 0..tokens.len() {
+            if let Some((y, rest)) = tokens[i].split_once('-') {
+                if let Some((m, d)) = rest.split_once('-') {
+                    if let (Ok(yv), Ok(mv), Ok(dv)) = (y.parse::<u32>(), m.parse::<u32>(), d.parse::<u32>()) {
+                        if (1970..=2100).contains(&yv) && (1..=12).contains(&mv) && (1..=31).contains(&dv) {
+                            return Some((i, yv, mv, dv));
+                        }
+                    }
+                }
+            }
+            if i + 2 < tokens.len() {
+                if let (Ok(yv), Ok(mv), Ok(dv)) = (tokens[i].parse::<u32>(), tokens[i + 1].parse::<u32>(), tokens[i + 2].parse::<u32>()) {
+                    if (1970..=2100).contains(&yv) && (1..=12).contains(&mv) && (1..=31).contains(&dv) {
+                        return Some((i, yv, mv, dv));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn find_movie_year(tokens: &[&str]) -> Option<(usize, u32)> {
+        for (i, tok) in tokens.iter().enumerate().skip(1) {
+            let trimmed = tok.trim_matches(|c| c == '(' || c == ')');
+            if trimmed.len() == 4 {
+                if let Ok(y) = trimmed.parse::<u32>() {
+                    if (1920..=2099).contains(&y) {
+                        return Some((i, y));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn title_case(s: &str) -> String {
+        s.split_whitespace()
+            .map(|w| {
+                let mut chars = w.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,5 +541,24 @@ mod tests {
 
         let out = tokio::fs::read_to_string(&marker).await.unwrap();
         assert_eq!(out.trim(), "tv:0");
+    }
+
+    #[test]
+    fn test_sorting_tv_movie_date() {
+        let cfg = SortingConfig {
+            enable_tv_sorting: true,
+            enable_movie_sorting: true,
+            enable_date_sorting: true,
+            ..Default::default()
+        };
+
+        let tv = Sorter::compute_sorted_relpath("the.expanse.s03e04.1080p.nzb", &cfg).unwrap();
+        assert_eq!(tv, PathBuf::from("The Expanse/Season 03/The Expanse - S03E04"));
+
+        let date = Sorter::compute_sorted_relpath("daily.show.2026.11.20.720p.nzb", &cfg).unwrap();
+        assert_eq!(date, PathBuf::from("Daily Show/2026-11-20/Daily Show - 2026-11-20"));
+
+        let movie = Sorter::compute_sorted_relpath("dune.part.two.2024.2160p.nzb", &cfg).unwrap();
+        assert_eq!(movie, PathBuf::from("Dune Part Two (2024)/Dune Part Two (2024)"));
     }
 }

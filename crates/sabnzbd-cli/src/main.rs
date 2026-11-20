@@ -2,10 +2,10 @@ use anyhow::Result;
 use parking_lot::RwLock;
 use sabnzbd_api::{create_router, extract_nzb_xml, AppState};
 use sabnzbd_core::{Config, JobStatus, QueueItem, ScheduleAction, ServerConfig, StatsTracker};
-use sabnzbd_decode::{FileAssembler, YencDecoder};
+use sabnzbd_decode::{ArticleDecoder, FileAssembler};
 use sabnzbd_nntp::{NntpError, NntpPool};
 use sabnzbd_nzb::{DownloadQueue, NzbDocument};
-use sabnzbd_postproc::PostProcessor;
+use sabnzbd_postproc::{PostProcessor, Sorter};
 use sabnzbd_services::{Notifier, RssPoller, Scheduler};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -50,6 +50,10 @@ async fn main() -> Result<()> {
     let port = loaded_cfg.http_port;
     let api_key = loaded_cfg.api_key.clone();
     let host_ip: std::net::IpAddr = loaded_cfg.http_host.parse().unwrap_or([0, 0, 0, 0].into());
+    let https_cfg = match (loaded_cfg.https_port, &loaded_cfg.https_cert, &loaded_cfg.https_key) {
+        (Some(p), Some(c), Some(k)) => Some((p, c.clone(), k.clone())),
+        _ => None,
+    };
 
     let config = Arc::new(RwLock::new(loaded_cfg));
     let queue = Arc::new(DownloadQueue::new_persistent(state_path));
@@ -71,6 +75,17 @@ async fn main() -> Result<()> {
 
     let app = create_router(state);
     let addr = SocketAddr::from((host_ip, port));
+
+    if let Some((tls_port, cert_path, key_path)) = https_cfg {
+        let tls_app = app.clone();
+        let tls_addr = SocketAddr::from((host_ip, tls_port));
+        tokio::spawn(async move {
+            if let Err(e) = serve_https(tls_addr, &cert_path, &key_path, tls_app).await {
+                error!("HTTPS listener error: {}", e);
+            }
+        });
+        info!(" HTTPS Web & API running at: https://127.0.0.1:{}", tls_port);
+    }
 
     info!("------------------------------------------------------------");
     info!(" RustNZBD (SABnzbd in Rust)");
@@ -95,6 +110,39 @@ async fn shutdown_signal(notify: Arc<Notify>) {
         _ = notify.notified() => {}
     }
     info!("Shutdown signal received");
+}
+
+async fn serve_https(
+    addr: SocketAddr,
+    cert_path: &Path,
+    key_path: &Path,
+    app: axum::Router,
+) -> Result<()> {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert_path)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let key = PrivateKeyDer::from_pem_file(key_path)?;
+    let tls_cfg = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls_cfg));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let acceptor = acceptor.clone();
+        let service = hyper_util::service::TowerToHyperService::new(app.clone());
+        tokio::spawn(async move {
+            if let Ok(tls_stream) = acceptor.accept(stream).await {
+                let io = hyper_util::rt::TokioIo::new(tls_stream);
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, service)
+                    .await;
+            }
+        });
+    }
 }
 
 async fn watch_dir_loop(config: Arc<RwLock<Config>>, queue: Arc<DownloadQueue>) {
@@ -296,7 +344,7 @@ async fn process_job(
 
             tasks.spawn(async move {
                 let (server_name, raw) = fetch_from_pools(&pools, &seg.message_id).await?;
-                let decoded = YencDecoder::decode(&raw).map_err(|e| e.to_string())?;
+                let decoded = ArticleDecoder::decode(&raw).map_err(|e| e.to_string())?;
                 let len = decoded.data.len() as u64;
                 FileAssembler::write_article(&dir, &fallback, &decoded)
                     .await
@@ -371,10 +419,28 @@ async fn process_job(
     }
 
     let cat_root = cfg.category_dir(&job.category);
-    let final_dir = cat_root.join(&safe_job_name);
-    move_to_complete(&work_dir, &final_dir)
-        .await
-        .map_err(|e| e.to_string())?;
+    let sorted_dest = match Sorter::sort_media_file(&work_dir, &cat_root, &job.filename, &cfg.sorting).await {
+        Ok(Some(path)) => {
+            info!("Sorted media to {:?}", path);
+            Some(path)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            warn!("Sorting issue for {}: {}", job.id, e);
+            None
+        }
+    };
+
+    let final_dir = if let Some(sorted_file) = sorted_dest {
+        let _ = tokio::fs::remove_dir_all(&work_dir).await;
+        sorted_file.parent().unwrap_or(&cat_root).to_path_buf()
+    } else {
+        let dest = cat_root.join(&safe_job_name);
+        move_to_complete(&work_dir, &dest)
+            .await
+            .map_err(|e| e.to_string())?;
+        dest
+    };
 
     if let (Some(script_dir), Some(script_name)) = (&cfg.script_dir, job.script.as_ref().or(cfg.default_script.as_ref())) {
         let script_path = script_dir.join(script_name);

@@ -30,6 +30,8 @@ pub struct ServerConfig {
     pub priority: i32,
     pub enable: bool,
     pub optional: bool,
+    #[serde(default)]
+    pub socks5_proxy: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -46,6 +48,7 @@ impl Default for ServerConfig {
             priority: 0,
             enable: false,
             optional: false,
+            socks5_proxy: None,
         }
     }
 }
@@ -82,6 +85,55 @@ pub struct Config {
     pub schedules: Vec<ScheduleRule>,
     #[serde(default)]
     pub notifications: NotificationConfig,
+    #[serde(default)]
+    pub sorting: SortingConfig,
+    #[serde(default)]
+    pub https_port: Option<u16>,
+    #[serde(default)]
+    pub https_cert: Option<PathBuf>,
+    #[serde(default)]
+    pub https_key: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SortingConfig {
+    #[serde(default)]
+    pub enable_tv_sorting: bool,
+    #[serde(default = "default_tv_sort")]
+    pub tv_sort_string: String,
+    #[serde(default)]
+    pub enable_movie_sorting: bool,
+    #[serde(default = "default_movie_sort")]
+    pub movie_sort_string: String,
+    #[serde(default)]
+    pub enable_date_sorting: bool,
+    #[serde(default = "default_date_sort")]
+    pub date_sort_string: String,
+}
+
+impl Default for SortingConfig {
+    fn default() -> Self {
+        Self {
+            enable_tv_sorting: false,
+            tv_sort_string: default_tv_sort(),
+            enable_movie_sorting: false,
+            movie_sort_string: default_movie_sort(),
+            enable_date_sorting: false,
+            date_sort_string: default_date_sort(),
+        }
+    }
+}
+
+fn default_tv_sort() -> String {
+    "{show}/Season {season:02}/{show} - S{season:02}E{episode:02}".to_string()
+}
+
+fn default_movie_sort() -> String {
+    "{title} ({year})/{title} ({year})".to_string()
+}
+
+fn default_date_sort() -> String {
+    "{show}/{year}-{month:02}-{day:02}/{show} - {year}-{month:02}-{day:02}".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +188,22 @@ pub struct NotificationConfig {
     pub notify_on_complete: bool,
     #[serde(default = "default_true")]
     pub notify_on_fail: bool,
+    #[serde(default)]
+    pub smtp_host: Option<String>,
+    #[serde(default = "default_smtp_port")]
+    pub smtp_port: u16,
+    #[serde(default)]
+    pub smtp_user: Option<String>,
+    #[serde(default)]
+    pub smtp_password: Option<String>,
+    #[serde(default)]
+    pub smtp_from: Option<String>,
+    #[serde(default)]
+    pub smtp_to: Option<String>,
+}
+
+fn default_smtp_port() -> u16 {
+    587
 }
 
 fn default_true() -> bool {
@@ -167,6 +235,10 @@ impl Default for Config {
             rss_feeds: Vec::new(),
             schedules: Vec::new(),
             notifications: NotificationConfig::default(),
+            sorting: SortingConfig::default(),
+            https_port: None,
+            https_cert: None,
+            https_key: None,
         }
     }
 }

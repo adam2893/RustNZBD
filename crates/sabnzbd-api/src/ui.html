@@ -158,11 +158,36 @@
                 <input id="srvHost" class="grow" type="text" placeholder="news.example.com" />
                 <input id="srvPort" type="number" placeholder="Port" value="563" style="width: 80px;" />
                 <label class="muted"><input id="srvSsl" type="checkbox" checked /> SSL</label>
-                <input id="srvUser" type="text" placeholder="Username" style="width: 120px;" />
-                <input id="srvPass" type="password" placeholder="Password" style="width: 120px;" />
-                <input id="srvConns" type="number" placeholder="Conns" value="8" style="width: 75px;" />
+                <input id="srvUser" type="text" placeholder="Username" style="width: 110px;" />
+                <input id="srvPass" type="password" placeholder="Password" style="width: 110px;" />
+                <input id="srvProxy" type="text" placeholder="SOCKS5 host:port" style="width: 130px;" />
+                <input id="srvConns" type="number" placeholder="Conns" value="8" style="width: 70px;" />
                 <button onclick="addServer()">Add Server</button>
             </div>
+        </section>
+
+        <section class="card">
+            <h2>Settings (Sorting, Notifications, Post-Processing)</h2>
+            <div class="row" style="margin-bottom: 10px;">
+                <label class="muted"><input id="setCleanup" type="checkbox" checked /> Cleanup Archives</label>
+                <label class="muted"><input id="setDeobf" type="checkbox" checked /> Deobfuscate Filenames</label>
+                <label class="muted"><input id="setDups" type="checkbox" checked /> Detect Duplicates</label>
+                <label class="muted"><input id="setTvSort" type="checkbox" /> TV Sorting</label>
+                <label class="muted"><input id="setMovieSort" type="checkbox" /> Movie Sorting</label>
+                <label class="muted"><input id="setDateSort" type="checkbox" /> Date Sorting</label>
+            </div>
+            <div class="row" style="margin-bottom: 10px;">
+                <input id="setWebhook" class="grow" type="text" placeholder="Webhook URL (Discord/Slack/Apprise)" />
+                <input id="setSpeed" type="number" placeholder="Speed Limit (KB/s)" style="width: 150px;" />
+            </div>
+            <div class="row" style="margin-bottom: 10px;">
+                <input id="setSmtpHost" type="text" placeholder="SMTP Host" style="width: 160px;" />
+                <input id="setSmtpPort" type="number" placeholder="Port" value="587" style="width: 75px;" />
+                <input id="setSmtpFrom" type="text" placeholder="From Email" style="width: 170px;" />
+                <input id="setSmtpTo" type="text" placeholder="To Email" style="width: 170px;" />
+                <button onclick="saveSettings()">Save Settings</button>
+            </div>
+            <div id="settingsMsg" class="msg"></div>
         </section>
     </div>
 
@@ -244,15 +269,63 @@
         async function refreshServers() {
             const data = await apiCall('mode=get_config');
             if (data.error || !data.config) return;
-            const servers = data.config.servers || [];
+            const cfg = data.config;
+            const servers = cfg.servers || [];
             const el = document.getElementById('serversList');
             if (!servers.length) {
                 el.textContent = 'No NNTP servers configured.';
-                return;
+            } else {
+                el.innerHTML = servers.map((s, idx) =>
+                    `<div style="margin-bottom:4px;">• <strong>${escapeHtml(s.name)}</strong> (${escapeHtml(s.host)}:${s.port}, ssl=${s.ssl}, conns=${s.connections}, priority=${s.priority}) <button class="danger" onclick="deleteServer(${idx})">Remove</button></div>`
+                ).join('');
             }
-            el.innerHTML = servers.map(s =>
-                `<div>• <strong>${escapeHtml(s.name)}</strong> (${escapeHtml(s.host)}:${s.port}, ssl=${s.ssl}, conns=${s.connections}, priority=${s.priority})</div>`
-            ).join('');
+            document.getElementById('setCleanup').checked = !!cfg.cleanup_archives;
+            document.getElementById('setDeobf').checked = !!cfg.deobfuscate_filenames;
+            document.getElementById('setDups').checked = !!cfg.detect_duplicates;
+            document.getElementById('setTvSort').checked = !!(cfg.sorting && cfg.sorting.enable_tv_sorting);
+            document.getElementById('setMovieSort').checked = !!(cfg.sorting && cfg.sorting.enable_movie_sorting);
+            document.getElementById('setDateSort').checked = !!(cfg.sorting && cfg.sorting.enable_date_sorting);
+            document.getElementById('setWebhook').value = (cfg.notifications && cfg.notifications.webhook_url) || '';
+            document.getElementById('setSpeed').value = cfg.speed_limit ? Math.floor(cfg.speed_limit / 1024) : '';
+            document.getElementById('setSmtpHost').value = (cfg.notifications && cfg.notifications.smtp_host) || '';
+            document.getElementById('setSmtpPort').value = (cfg.notifications && cfg.notifications.smtp_port) || 587;
+            document.getElementById('setSmtpFrom').value = (cfg.notifications && cfg.notifications.smtp_from) || '';
+            document.getElementById('setSmtpTo').value = (cfg.notifications && cfg.notifications.smtp_to) || '';
+        }
+
+        async function deleteServer(idx) {
+            await apiCall(`mode=delete_server&value=${idx}`);
+            refreshServers();
+        }
+
+        async function saveSettings() {
+            const kbps = parseInt(document.getElementById('setSpeed').value, 10);
+            const payload = {
+                cleanup_archives: document.getElementById('setCleanup').checked,
+                deobfuscate_filenames: document.getElementById('setDeobf').checked,
+                detect_duplicates: document.getElementById('setDups').checked,
+                speed_limit: (!isNaN(kbps) && kbps > 0) ? kbps * 1024 : null,
+                sorting: {
+                    enable_tv_sorting: document.getElementById('setTvSort').checked,
+                    enable_movie_sorting: document.getElementById('setMovieSort').checked,
+                    enable_date_sorting: document.getElementById('setDateSort').checked
+                },
+                notifications: {
+                    webhook_url: document.getElementById('setWebhook').value.trim() || null,
+                    notify_on_complete: true,
+                    notify_on_fail: true,
+                    smtp_host: document.getElementById('setSmtpHost').value.trim() || null,
+                    smtp_port: parseInt(document.getElementById('setSmtpPort').value, 10) || 587,
+                    smtp_from: document.getElementById('setSmtpFrom').value.trim() || null,
+                    smtp_to: document.getElementById('setSmtpTo').value.trim() || null
+                }
+            };
+            const res = await apiCall('mode=save_settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            document.getElementById('settingsMsg').textContent = res.status ? 'Settings saved' : `Error: ${res.error}`;
         }
 
         async function togglePause() {
@@ -292,6 +365,7 @@
                 username: document.getElementById('srvUser').value.trim() || null,
                 password: document.getElementById('srvPass').value || null,
                 connections: parseInt(document.getElementById('srvConns').value, 10) || 8,
+                socks5_proxy: document.getElementById('srvProxy').value.trim() || null,
                 retention: 0,
                 priority: 0,
                 enable: true,

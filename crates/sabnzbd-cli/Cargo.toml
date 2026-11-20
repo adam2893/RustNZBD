@@ -20,6 +20,10 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 parking_lot = { workspace = true }

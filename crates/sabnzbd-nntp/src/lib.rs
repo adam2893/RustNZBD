@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf, ReadHalf, WriteHalf};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Semaphore};
 use tokio_rustls::client::TlsStream;
@@ -92,10 +92,67 @@ pub struct NntpConnection {
 }
 
 impl NntpConnection {
+    async fn connect_via_socks5(
+        proxy_addr: &str,
+        target_host: &str,
+        target_port: u16,
+    ) -> Result<TcpStream, NntpError> {
+        let mut stream = TcpStream::connect(proxy_addr).await?;
+        // Greeting: VER=5, NMETHODS=1, NO AUTH=0
+        stream.write_all(&[0x05, 0x01, 0x00]).await?;
+        let mut method_resp = [0u8; 2];
+        stream.read_exact(&mut method_resp).await?;
+        if method_resp != [0x05, 0x00] {
+            return Err(NntpError::Io(std::io::Error::other("SOCKS5 auth method rejected")));
+        }
+
+        // CONNECT request with domain name (ATYP=0x03)
+        let host_bytes = target_host.as_bytes();
+        if host_bytes.len() > 255 {
+            return Err(NntpError::Io(std::io::Error::other("Target hostname too long for SOCKS5")));
+        }
+        let mut req = Vec::with_capacity(7 + host_bytes.len());
+        req.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host_bytes.len() as u8]);
+        req.extend_from_slice(host_bytes);
+        req.extend_from_slice(&target_port.to_be_bytes());
+        stream.write_all(&req).await?;
+
+        let mut head = [0u8; 4];
+        stream.read_exact(&mut head).await?;
+        if head[1] != 0x00 {
+            return Err(NntpError::Io(std::io::Error::other(format!(
+                "SOCKS5 connect failed with code {}",
+                head[1]
+            ))));
+        }
+        match head[3] {
+            0x01 => {
+                let mut skip = [0u8; 6];
+                stream.read_exact(&mut skip).await?;
+            }
+            0x03 => {
+                let mut len = [0u8; 1];
+                stream.read_exact(&mut len).await?;
+                let mut skip = vec![0u8; len[0] as usize + 2];
+                stream.read_exact(&mut skip).await?;
+            }
+            0x04 => {
+                let mut skip = [0u8; 18];
+                stream.read_exact(&mut skip).await?;
+            }
+            _ => {}
+        }
+        Ok(stream)
+    }
+
     pub async fn connect(config: &ServerConfig) -> Result<Self, NntpError> {
         let addr = format!("{}:{}", config.host, config.port);
         debug!("Connecting to NNTP server at {} (ssl={})", addr, config.ssl);
-        let tcp = TcpStream::connect(&addr).await?;
+        let tcp = if let Some(proxy) = config.socks5_proxy.as_deref().filter(|p| !p.trim().is_empty()) {
+            Self::connect_via_socks5(proxy.trim(), &config.host, config.port).await?
+        } else {
+            TcpStream::connect(&addr).await?
+        };
 
         let stream = if config.ssl {
             let connector = build_tls_connector();
@@ -325,5 +382,47 @@ mod tests {
 
         let err = pool.fetch_body("<missing@test>").await.unwrap_err();
         assert!(matches!(err, NntpError::ArticleNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_socks5_nntp_tunnel() {
+        let socks_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socks_port = socks_listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let (mut sock, _) = socks_listener.accept().await.unwrap();
+            let mut hello = [0u8; 3];
+            sock.read_exact(&mut hello).await.unwrap();
+            assert_eq!(hello, [0x05, 0x01, 0x00]);
+            sock.write_all(&[0x05, 0x00]).await.unwrap();
+
+            let mut head = [0u8; 5];
+            sock.read_exact(&mut head).await.unwrap();
+            let domain_len = head[4] as usize;
+            let mut rest = vec![0u8; domain_len + 2];
+            sock.read_exact(&mut rest).await.unwrap();
+            assert_eq!(&rest[..domain_len], b"news.internal");
+
+            // Reply success (0x01 IPv4 0.0.0.0:0)
+            sock.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await.unwrap();
+            sock.write_all(b"200 ProxiedNNTP\r\n").await.unwrap();
+
+            let mut buf = [0u8; 64];
+            let n = sock.read(&mut buf).await.unwrap();
+            assert!(std::str::from_utf8(&buf[..n]).unwrap().contains("STAT <x@y>"));
+            sock.write_all(b"223 0 <x@y> status\r\n").await.unwrap();
+        });
+
+        let cfg = ServerConfig {
+            host: "news.internal".to_string(),
+            port: 119,
+            ssl: false,
+            socks5_proxy: Some(format!("127.0.0.1:{socks_port}")),
+            enable: true,
+            ..Default::default()
+        };
+
+        let mut conn = NntpConnection::connect(&cfg).await.unwrap();
+        assert!(conn.stat("x@y").await.unwrap());
     }
 }

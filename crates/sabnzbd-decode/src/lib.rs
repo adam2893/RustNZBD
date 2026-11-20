@@ -206,6 +206,163 @@ impl YencDecoder {
     }
 }
 
+/// Unified Usenet article decoder: dispatches yEnc, uuencode, or base64 fallback.
+pub struct ArticleDecoder;
+
+impl ArticleDecoder {
+    pub fn decode(raw: &[u8]) -> Result<DecodedArticle, DecodeError> {
+        if YencDecoder::find_subslice(raw, b"=ybegin").is_some() {
+            return YencDecoder::decode(raw);
+        }
+        if UuDecoder::find_begin_line(raw).is_some() {
+            return UuDecoder::decode(raw);
+        }
+        Base64Decoder::decode(raw)
+    }
+}
+
+/// Decodes traditional Usenet `uuencode` (`begin <mode> <name> ... end`) articles.
+pub struct UuDecoder;
+
+impl UuDecoder {
+    fn find_begin_line(raw: &[u8]) -> Option<usize> {
+        let text = String::from_utf8_lossy(raw);
+        let mut offset = 0usize;
+        for line in text.split_inclusive('\n') {
+            let trimmed = line.trim();
+            if trimmed.starts_with("begin ") {
+                let parts: Vec<&str> = trimmed.splitn(3, ' ').collect();
+                if parts.len() == 3 && parts[1].chars().all(|c| c.is_ascii_digit()) {
+                    return Some(offset);
+                }
+            }
+            offset += line.len();
+        }
+        None
+    }
+
+    pub fn decode(raw: &[u8]) -> Result<DecodedArticle, DecodeError> {
+        let text = String::from_utf8_lossy(raw);
+        let mut filename = String::from("uuencoded.bin");
+        let mut started = false;
+        let mut output = Vec::new();
+
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if !started {
+                if trimmed.starts_with("begin ") {
+                    let parts: Vec<&str> = trimmed.splitn(3, ' ').collect();
+                    if parts.len() == 3 {
+                        filename = parts[2].trim().to_string();
+                        started = true;
+                    }
+                }
+                continue;
+            }
+            if trimmed == "end" {
+                break;
+            }
+            if trimmed == "`" {
+                continue;
+            }
+            let bytes = trimmed.as_bytes();
+            if bytes.is_empty() {
+                continue;
+            }
+            let len = ((bytes[0].wrapping_sub(32)) & 0x3f) as usize;
+            if len == 0 {
+                continue;
+            }
+            let mut decoded_line = Vec::with_capacity(len);
+            for chunk in bytes[1..].chunks(4) {
+                if chunk.len() < 4 {
+                    break;
+                }
+                let c0 = chunk[0].wrapping_sub(32) & 0x3f;
+                let c1 = chunk[1].wrapping_sub(32) & 0x3f;
+                let c2 = chunk[2].wrapping_sub(32) & 0x3f;
+                let c3 = chunk[3].wrapping_sub(32) & 0x3f;
+                decoded_line.push((c0 << 2) | (c1 >> 4));
+                decoded_line.push((c1 << 4) | (c2 >> 2));
+                decoded_line.push((c2 << 6) | c3);
+            }
+            decoded_line.truncate(len);
+            output.extend_from_slice(&decoded_line);
+        }
+
+        if !started {
+            return Err(DecodeError::MissingHeader);
+        }
+
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&output);
+        let crc32 = hasher.finalize();
+
+        Ok(DecodedArticle {
+            header: YencHeader {
+                name: filename,
+                line: 45,
+                size: output.len(),
+                part: None,
+                total: None,
+            },
+            part_offset: 0,
+            part_size: output.len(),
+            data: output,
+            crc32,
+        })
+    }
+}
+
+/// Decodes MIME/base64-encoded Usenet articles.
+pub struct Base64Decoder;
+
+impl Base64Decoder {
+    pub fn decode(raw: &[u8]) -> Result<DecodedArticle, DecodeError> {
+        let text = String::from_utf8_lossy(raw);
+        let mut output = Vec::new();
+        let mut buf: u32 = 0;
+        let mut bits: u8 = 0;
+
+        for b in text.bytes() {
+            let val = match b {
+                b'A'..=b'Z' => b - b'A',
+                b'a'..=b'z' => b - b'a' + 26,
+                b'0'..=b'9' => b - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                b'=' => break,
+                b'\r' | b'\n' | b' ' | b'\t' => continue,
+                _ => return Err(DecodeError::CorruptedData),
+            };
+            buf = (buf << 6) | (val as u32);
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                output.push(((buf >> bits) & 0xff) as u8);
+            }
+        }
+
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&output);
+        let crc32 = hasher.finalize();
+
+        Ok(DecodedArticle {
+            header: YencHeader {
+                name: "base64.bin".to_string(),
+                line: 76,
+                size: output.len(),
+                part: None,
+                total: None,
+            },
+            part_offset: 0,
+            part_size: output.len(),
+            data: output,
+            crc32,
+        })
+    }
+}
+
 /// Writes decoded yEnc parts at their byte offsets into target files.
 pub struct FileAssembler;
 
@@ -327,5 +484,19 @@ mod tests {
         assert_eq!(path1, path2);
         let assembled = tokio::fs::read(&path1).await.unwrap();
         assert_eq!(assembled, b"Hello RustNZBD!\n");
+    }
+
+    #[test]
+    fn test_uuencode_and_base64_fallback() {
+        // "Cat" uuencoded: length 3 ('#'), bytes C(67) a(97) t(116) -> 0x436174 -> 010000 110110 000101 110100 -> 16,54,5,52 -> +32 = 48('0'), 86('V'), 37('%'), 84('T')
+        let uu = b"begin 644 cat.txt\r\n#0V%T\r\n`\r\nend\r\n";
+        let dec = ArticleDecoder::decode(uu).unwrap();
+        assert_eq!(dec.header.name, "cat.txt");
+        assert_eq!(dec.data, b"Cat");
+
+        // "Hello!" in base64: SGVsbG8h
+        let b64 = b"SGVs\r\nbG8h\r\n";
+        let dec2 = ArticleDecoder::decode(b64).unwrap();
+        assert_eq!(dec2.data, b"Hello!");
     }
 }
