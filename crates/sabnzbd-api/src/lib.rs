@@ -97,10 +97,21 @@ async fn handle_api(
         "version" => Json(json!({ "version": SABNZBD_VERSION })).into_response(),
 
         "queue" => {
-            if query.name.as_deref() == Some("delete") {
-                if let Some(id) = query.value.as_deref() {
-                    let deleted = state.queue.delete_queue_item(id);
-                    return Json(json!({ "status": deleted, "nzo_ids": [id] })).into_response();
+            if let Some(id) = query.value.as_deref() {
+                match query.name.as_deref() {
+                    Some("delete") => {
+                        let deleted = state.queue.delete_queue_item(id);
+                        return Json(json!({ "status": deleted, "nzo_ids": [id] })).into_response();
+                    }
+                    Some("pause") => {
+                        let ok = state.queue.pause_item(id);
+                        return Json(json!({ "status": ok, "nzo_ids": [id] })).into_response();
+                    }
+                    Some("resume") => {
+                        let ok = state.queue.resume_item(id);
+                        return Json(json!({ "status": ok, "nzo_ids": [id] })).into_response();
+                    }
+                    _ => {}
                 }
             }
 
@@ -220,6 +231,21 @@ async fn handle_api(
                 "day": 0
             })).into_response()
         }
+
+        "get_cats" => {
+            let mut cats = vec!["*".to_string()];
+            for k in state.config.read().categories.keys() {
+                if !cats.contains(k) {
+                    cats.push(k.clone());
+                }
+            }
+            cats.sort();
+            Json(json!({ "categories": cats })).into_response()
+        }
+
+        "warnings" => Json(json!({ "warnings": [] })).into_response(),
+
+        "auth" => Json(json!({ "auth": "apikey" })).into_response(),
 
         "fullstatus" => {
             Json(json!({
@@ -389,7 +415,7 @@ async fn handle_api(
 }
 
 /// Extracts `<nzb ...>...</nzb>` from raw XML, gzipped `.nzb.gz`, or multipart/form-data upload.
-fn extract_nzb_xml(raw: &[u8]) -> String {
+pub fn extract_nzb_xml(raw: &[u8]) -> String {
     let decompressed;
     let slice = if raw.starts_with(&[0x1f, 0x8b]) {
         let mut decoder = GzDecoder::new(raw);

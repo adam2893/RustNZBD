@@ -323,17 +323,53 @@ impl DownloadQueue {
         deleted
     }
 
-    /// Claims the next queued job with an attached NzbDocument and marks it Downloading.
+    pub fn pause_item(&self, id: &str) -> bool {
+        let mut changed = false;
+        for entry in self.items.write().iter_mut() {
+            if entry.item.id == id && entry.item.status == JobStatus::Queued {
+                entry.item.status = JobStatus::Paused;
+                changed = true;
+                break;
+            }
+        }
+        if changed {
+            self.persist();
+        }
+        changed
+    }
+
+    pub fn resume_item(&self, id: &str) -> bool {
+        let mut changed = false;
+        for entry in self.items.write().iter_mut() {
+            if entry.item.id == id && entry.item.status == JobStatus::Paused {
+                entry.item.status = JobStatus::Queued;
+                changed = true;
+                break;
+            }
+        }
+        if changed {
+            self.persist();
+        }
+        changed
+    }
+
+    /// Claims the highest-priority queued job with an attached NzbDocument and marks it Downloading.
     pub fn claim_next_job(&self) -> Option<(QueueItem, NzbDocument)> {
         if *self.paused.read() {
             return None;
         }
         let mut items = self.items.write();
-        for entry in items.iter_mut() {
-            if entry.item.status == JobStatus::Queued && entry.document.is_some() {
-                entry.item.status = JobStatus::Downloading;
-                return Some((entry.item.clone(), entry.document.clone().unwrap()));
-            }
+        let best_idx = items
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.item.status == JobStatus::Queued && e.document.is_some())
+            .max_by_key(|(_, e)| e.item.priority)
+            .map(|(idx, _)| idx);
+
+        if let Some(idx) = best_idx {
+            let entry = &mut items[idx];
+            entry.item.status = JobStatus::Downloading;
+            return Some((entry.item.clone(), entry.document.clone().unwrap()));
         }
         None
     }

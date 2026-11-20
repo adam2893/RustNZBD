@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use uuid::Uuid;
@@ -55,12 +56,19 @@ pub struct Config {
     pub http_host: String,
     pub complete_dir: PathBuf,
     pub download_dir: PathBuf,
+    #[serde(default)]
+    pub watch_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub categories: HashMap<String, PathBuf>,
     pub servers: Vec<ServerConfig>,
     pub speed_limit: Option<usize>, // bytes/s, None = unlimited
 }
 
 impl Default for Config {
     fn default() -> Self {
+        let mut categories = HashMap::new();
+        categories.insert("tv".to_string(), PathBuf::from("./downloads/complete/tv"));
+        categories.insert("movies".to_string(), PathBuf::from("./downloads/complete/movies"));
         Self {
             api_key: Uuid::new_v4().to_string().replace('-', ""),
             nzb_key: Uuid::new_v4().to_string().replace('-', ""),
@@ -68,6 +76,8 @@ impl Default for Config {
             http_host: "0.0.0.0".to_string(),
             complete_dir: PathBuf::from("./downloads/complete"),
             download_dir: PathBuf::from("./downloads/incomplete"),
+            watch_dir: Some(PathBuf::from("./downloads/watch")),
+            categories,
             servers: Vec::new(),
             speed_limit: None,
         }
@@ -75,6 +85,21 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Resolves the final destination directory for a completed job based on its category.
+    pub fn category_dir(&self, category: &str) -> PathBuf {
+        let cat = category.trim();
+        if cat.is_empty() || cat == "default" || cat == "*" {
+            return self.complete_dir.clone();
+        }
+        if let Some(mapped) = self.categories.get(cat) {
+            return mapped.clone();
+        }
+        let safe_cat = Path::new(cat)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("default");
+        self.complete_dir.join(safe_cat)
+    }
     /// Loads TOML config from `path`, or writes and returns a default config if missing.
     pub fn load_or_create(path: &Path) -> Result<Self, ConfigError> {
         if path.exists() {
