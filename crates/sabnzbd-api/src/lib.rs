@@ -5,11 +5,13 @@ use axum::{
     routing::get,
     Router,
 };
+use flate2::read::GzDecoder;
 use parking_lot::RwLock;
 use sabnzbd_core::{Config, JobStatus, ServerConfig};
 use sabnzbd_nzb::{DownloadQueue, NzbDocument};
 use serde::Deserialize;
 use serde_json::json;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -134,13 +136,20 @@ async fn handle_api(
                 })
                 .collect();
 
+            let speedlimit_kbps = state
+                .config
+                .read()
+                .speed_limit
+                .map(|bps| (bps / 1024).to_string())
+                .unwrap_or_default();
+
             Json(json!({
                 "queue": {
                     "version": SABNZBD_VERSION,
                     "paused": paused,
                     "pause_int": if paused { "1" } else { "0" },
-                    "speedlimit": "",
-                    "speedlimit_abs": "",
+                    "speedlimit": speedlimit_kbps,
+                    "speedlimit_abs": speedlimit_kbps,
                     "speed": format!("{:.1} K", total_speed as f64 / 1024.0),
                     "size": format!("{:.1} MB", total_bytes as f64 / 1_048_576.0),
                     "sizeleft": format!("{:.1} MB", mb_left),
@@ -221,6 +230,30 @@ async fn handle_api(
                     }
                 }
             })).into_response()
+        }
+
+        "config" => {
+            if query.name.as_deref() == Some("speedlimit") {
+                let raw_val = query.value.as_deref().unwrap_or("").trim();
+                let limit_bps = if raw_val.is_empty() || raw_val == "0" || raw_val == "100%" {
+                    None
+                } else if let Ok(kbps) = raw_val.trim_end_matches(['K', 'k']).parse::<usize>() {
+                    Some(kbps.saturating_mul(1024))
+                } else {
+                    return Json(json!({ "status": false, "error": "Invalid speedlimit" })).into_response();
+                };
+                {
+                    let mut cfg = state.config.write();
+                    cfg.speed_limit = limit_bps;
+                    if let Some(path) = &state.config_path {
+                        if let Err(e) = cfg.save(path) {
+                            warn!("Failed saving config to {:?}: {}", path, e);
+                        }
+                    }
+                }
+                return Json(json!({ "status": true })).into_response();
+            }
+            Json(json!({ "status": false, "error": "Unsupported config operation" })).into_response()
         }
 
         "get_config" => {
@@ -355,9 +388,23 @@ async fn handle_api(
     }
 }
 
-/// Extracts `<nzb ...>...</nzb>` from either raw XML or a multipart/form-data upload.
+/// Extracts `<nzb ...>...</nzb>` from raw XML, gzipped `.nzb.gz`, or multipart/form-data upload.
 fn extract_nzb_xml(raw: &[u8]) -> String {
-    let text = String::from_utf8_lossy(raw);
+    let decompressed;
+    let slice = if raw.starts_with(&[0x1f, 0x8b]) {
+        let mut decoder = GzDecoder::new(raw);
+        let mut buf = Vec::new();
+        if decoder.read_to_end(&mut buf).is_ok() {
+            decompressed = buf;
+            &decompressed[..]
+        } else {
+            raw
+        }
+    } else {
+        raw
+    };
+
+    let text = String::from_utf8_lossy(slice);
     if let Some(start) = text.find("<nzb") {
         if let Some(end) = text.rfind("</nzb>") {
             return text[start..end + 6].to_string();
@@ -505,5 +552,50 @@ mod tests {
             .unwrap();
         let cfg = json_body(resp).await;
         assert_eq!(cfg["config"]["servers"][0]["password"], "********");
+    }
+
+    #[tokio::test]
+    async fn test_api_gzipped_nzb_and_speedlimit() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let (state, key) = test_state(None);
+        let app = create_router(state);
+
+        let nzb = r#"<nzb><file poster="a" date="1" subject="s"><groups><group>alt.test</group></groups><segments><segment bytes="2048" number="1">id1@test</segment></segments></file></nzb>"#;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(nzb.as_bytes()).unwrap();
+        let gz_bytes = encoder.finish().unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api?mode=addfile&nzbname=gz.nzb&apikey={key}"))
+                    .body(Body::from(gz_bytes))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(resp).await["status"], true);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api?mode=config&name=speedlimit&value=500K&apikey={key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(resp).await["status"], true);
+
+        let resp = app
+            .oneshot(Request::get(format!("/api?mode=queue&apikey={key}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let q = json_body(resp).await;
+        assert_eq!(q["queue"]["speedlimit"], "500");
+        assert_eq!(q["queue"]["slots"].as_array().unwrap().len(), 1);
     }
 }

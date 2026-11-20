@@ -28,13 +28,17 @@ async fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("rustnzbd.toml"));
 
+    let state_path = std::env::var("RUSTNZBD_STATE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("rustnzbd_state.json"));
+
     let loaded_cfg = Config::load_or_create(&config_path)?;
     let port = loaded_cfg.http_port;
     let api_key = loaded_cfg.api_key.clone();
     let host_ip: std::net::IpAddr = loaded_cfg.http_host.parse().unwrap_or([0, 0, 0, 0].into());
 
     let config = Arc::new(RwLock::new(loaded_cfg));
-    let queue = Arc::new(DownloadQueue::new());
+    let queue = Arc::new(DownloadQueue::new_persistent(state_path));
 
     // Spawn background download & post-processing worker
     tokio::spawn(download_worker_loop(config.clone(), queue.clone()));
@@ -66,7 +70,7 @@ async fn download_worker_loop(config: Arc<RwLock<Config>>, queue: Arc<DownloadQu
     loop {
         if let Some((job, doc)) = queue.claim_next_job() {
             let cfg_snapshot = config.read().clone();
-            if let Err(err) = process_job(&cfg_snapshot, &queue, &job, doc).await {
+            if let Err(err) = process_job(&config, &cfg_snapshot, &queue, &job, doc).await {
                 error!("Job {} failed: {}", job.id, err);
                 let job_dir = cfg_snapshot.download_dir.join(&job.filename);
                 queue.finish_job(&job.id, job_dir, Some(err));
@@ -78,6 +82,7 @@ async fn download_worker_loop(config: Arc<RwLock<Config>>, queue: Arc<DownloadQu
 }
 
 async fn process_job(
+    live_config: &Arc<RwLock<Config>>,
     cfg: &Config,
     queue: &DownloadQueue,
     job: &QueueItem,
@@ -136,7 +141,17 @@ async fn process_job(
             Ok(Ok(bytes)) => {
                 downloaded_total += bytes;
                 let elapsed = started.elapsed().as_secs_f64().max(0.001);
-                let speed_bps = (downloaded_total as f64 / elapsed) as u64;
+                let speed_limit = live_config.read().speed_limit;
+                if let Some(limit_bps) = speed_limit {
+                    if limit_bps > 0 {
+                        let target_secs = downloaded_total as f64 / limit_bps as f64;
+                        if target_secs > elapsed {
+                            tokio::time::sleep(Duration::from_secs_f64(target_secs - elapsed)).await;
+                        }
+                    }
+                }
+                let actual_elapsed = started.elapsed().as_secs_f64().max(0.001);
+                let speed_bps = (downloaded_total as f64 / actual_elapsed) as u64;
                 queue.add_downloaded_bytes(&job.id, bytes, speed_bps);
             }
             Ok(Err(e)) => warn!("Segment error in job {}: {}", job.id, e),

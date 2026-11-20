@@ -3,10 +3,12 @@ use parking_lot::RwLock;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use sabnzbd_core::{HistoryItem, JobStatus, QueueItem};
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
+use tracing::warn;
 use uuid::Uuid;
 
 #[derive(Error, Debug)]
@@ -17,14 +19,14 @@ pub enum NzbError {
     Invalid(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NzbSegment {
     pub bytes: u64,
     pub number: u32,
     pub message_id: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NzbFile {
     pub poster: String,
     pub date: u64,
@@ -33,7 +35,7 @@ pub struct NzbFile {
     pub segments: Vec<NzbSegment>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NzbDocument {
     pub files: Vec<NzbFile>,
 }
@@ -123,16 +125,24 @@ impl NzbDocument {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct QueuedEntry {
     item: QueueItem,
     document: Option<NzbDocument>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedState {
+    items: Vec<QueuedEntry>,
+    history: Vec<HistoryItem>,
+    paused: bool,
 }
 
 pub struct DownloadQueue {
     items: Arc<RwLock<VecDeque<QueuedEntry>>>,
     history: Arc<RwLock<Vec<HistoryItem>>>,
     paused: Arc<RwLock<bool>>,
+    state_path: Option<PathBuf>,
 }
 
 impl Default for DownloadQueue {
@@ -147,6 +157,74 @@ impl DownloadQueue {
             items: Arc::new(RwLock::new(VecDeque::new())),
             history: Arc::new(RwLock::new(Vec::new())),
             paused: Arc::new(RwLock::new(false)),
+            state_path: None,
+        }
+    }
+
+    /// Creates a persistent queue backed by a JSON state file, recovering any in-flight jobs to Queued.
+    pub fn new_persistent(path: PathBuf) -> Self {
+        if path.exists() {
+            match std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<PersistedState>(&s).ok())
+            {
+                Some(mut state) => {
+                    for entry in &mut state.items {
+                        if matches!(
+                            entry.item.status,
+                            JobStatus::Downloading
+                                | JobStatus::Checking
+                                | JobStatus::Repairing
+                                | JobStatus::Extracting
+                        ) {
+                            entry.item.status = if state.paused {
+                                JobStatus::Paused
+                            } else {
+                                JobStatus::Queued
+                            };
+                            entry.item.downloaded_bytes = 0;
+                            entry.item.speed_bps = 0;
+                        }
+                    }
+                    return Self {
+                        items: Arc::new(RwLock::new(VecDeque::from(state.items))),
+                        history: Arc::new(RwLock::new(state.history)),
+                        paused: Arc::new(RwLock::new(state.paused)),
+                        state_path: Some(path),
+                    };
+                }
+                None => {
+                    warn!("Failed to load queue state from {:?}, starting fresh", path);
+                }
+            }
+        }
+        Self {
+            items: Arc::new(RwLock::new(VecDeque::new())),
+            history: Arc::new(RwLock::new(Vec::new())),
+            paused: Arc::new(RwLock::new(false)),
+            state_path: Some(path),
+        }
+    }
+
+    fn persist(&self) {
+        let Some(path) = &self.state_path else {
+            return;
+        };
+        let state = PersistedState {
+            items: self.items.read().iter().cloned().collect(),
+            history: self.history.read().clone(),
+            paused: *self.paused.read(),
+        };
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        if let Ok(json) = serde_json::to_string(&state) {
+            let tmp = path.with_extension("tmp");
+            if std::fs::write(&tmp, json).is_ok() {
+                let _ = std::fs::rename(&tmp, path);
+            }
         }
     }
 
@@ -183,6 +261,7 @@ impl DownloadQueue {
             item: item.clone(),
             document,
         });
+        self.persist();
         item
     }
 
@@ -205,6 +284,7 @@ impl DownloadQueue {
                 entry.item.status = JobStatus::Paused;
             }
         }
+        self.persist();
     }
 
     pub fn resume(&self) {
@@ -214,20 +294,33 @@ impl DownloadQueue {
                 entry.item.status = JobStatus::Queued;
             }
         }
+        self.persist();
     }
 
     pub fn delete_queue_item(&self, id: &str) -> bool {
-        let mut items = self.items.write();
-        let before = items.len();
-        items.retain(|e| e.item.id != id);
-        items.len() < before
+        let deleted = {
+            let mut items = self.items.write();
+            let before = items.len();
+            items.retain(|e| e.item.id != id);
+            items.len() < before
+        };
+        if deleted {
+            self.persist();
+        }
+        deleted
     }
 
     pub fn delete_history_item(&self, id: &str) -> bool {
-        let mut hist = self.history.write();
-        let before = hist.len();
-        hist.retain(|h| h.id != id);
-        hist.len() < before
+        let deleted = {
+            let mut hist = self.history.write();
+            let before = hist.len();
+            hist.retain(|h| h.id != id);
+            hist.len() < before
+        };
+        if deleted {
+            self.persist();
+        }
+        deleted
     }
 
     /// Claims the next queued job with an attached NzbDocument and marks it Downloading.
@@ -266,27 +359,34 @@ impl DownloadQueue {
 
     /// Moves a job from the active queue into history.
     pub fn finish_job(&self, id: &str, storage_path: PathBuf, failure_reason: Option<String>) {
-        let mut items = self.items.write();
-        if let Some(pos) = items.iter().position(|e| e.item.id == id) {
-            let entry = items.remove(pos).unwrap();
-            let status = if failure_reason.is_some() {
-                "Failed".to_string()
-            } else {
-                "Completed".to_string()
-            };
-            self.history.write().insert(
-                0,
-                HistoryItem {
-                    id: entry.item.id,
-                    name: entry.item.filename,
-                    size: entry.item.total_bytes.max(entry.item.downloaded_bytes),
-                    category: entry.item.category,
-                    status,
-                    completed_time: Utc::now(),
-                    storage_path,
-                    failure_reason,
-                },
-            );
+        let mut moved = false;
+        {
+            let mut items = self.items.write();
+            if let Some(pos) = items.iter().position(|e| e.item.id == id) {
+                let entry = items.remove(pos).unwrap();
+                let status = if failure_reason.is_some() {
+                    "Failed".to_string()
+                } else {
+                    "Completed".to_string()
+                };
+                self.history.write().insert(
+                    0,
+                    HistoryItem {
+                        id: entry.item.id,
+                        name: entry.item.filename,
+                        size: entry.item.total_bytes.max(entry.item.downloaded_bytes),
+                        category: entry.item.category,
+                        status,
+                        completed_time: Utc::now(),
+                        storage_path,
+                        failure_reason,
+                    },
+                );
+                moved = true;
+            }
+        }
+        if moved {
+            self.persist();
         }
     }
 }
@@ -340,5 +440,33 @@ mod tests {
         assert!(q.list().is_empty());
         assert_eq!(q.history().len(), 1);
         assert_eq!(q.history()[0].status, "Completed");
+    }
+
+    #[test]
+    fn test_queue_persistence_and_crash_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+
+        {
+            let q = DownloadQueue::new_persistent(state_path.clone());
+            let doc = NzbDocument { files: vec![] };
+            let item = q.add_nzb_with_doc("persist.nzb".to_string(), 2048, "movies".to_string(), Some(doc));
+            let _ = q.claim_next_job();
+            q.finish_job(&item.id, PathBuf::from("/tmp/movies/persist"), None);
+
+            let doc2 = NzbDocument { files: vec![] };
+            let item2 = q.add_nzb_with_doc("inflight.nzb".to_string(), 4096, "tv".to_string(), Some(doc2));
+            let _ = q.claim_next_job();
+            // Simulate crash while Downloading (force persist via pause/resume or status)
+            q.set_status(&item2.id, JobStatus::Downloading);
+            q.persist();
+        }
+
+        let recovered = DownloadQueue::new_persistent(state_path);
+        assert_eq!(recovered.history().len(), 1);
+        assert_eq!(recovered.history()[0].name, "persist.nzb");
+        assert_eq!(recovered.list().len(), 1);
+        assert_eq!(recovered.list()[0].filename, "inflight.nzb");
+        assert_eq!(recovered.list()[0].status, JobStatus::Queued);
     }
 }
