@@ -1,4 +1,8 @@
+use std::io::SeekFrom;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
+use tokio::fs::OpenOptions;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 #[derive(Error, Debug)]
 pub enum DecodeError {
@@ -8,6 +12,8 @@ pub enum DecodeError {
     CorruptedData,
     #[error("CRC32 mismatch: expected {expected:08x}, got {actual:08x}")]
     CrcMismatch { expected: u32, actual: u32 },
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -38,7 +44,10 @@ impl YencDecoder {
             .ok_or(DecodeError::MissingHeader)?;
 
         let after_begin = &raw[begin_pos..];
-        let first_nl = after_begin.iter().position(|&b| b == b'\n').unwrap_or(after_begin.len());
+        let first_nl = after_begin
+            .iter()
+            .position(|&b| b == b'\n')
+            .unwrap_or(after_begin.len());
         let ybegin_line = String::from_utf8_lossy(&after_begin[..first_nl]);
         let mut header = YencHeader::default();
         Self::parse_ybegin(&ybegin_line, &mut header);
@@ -54,7 +63,10 @@ impl YencDecoder {
         let mut part_size = header.size;
         let trimmed_rest = Self::trim_start_newlines(rest);
         if trimmed_rest.starts_with(b"=ypart ") {
-            let part_nl = trimmed_rest.iter().position(|&b| b == b'\n').unwrap_or(trimmed_rest.len());
+            let part_nl = trimmed_rest
+                .iter()
+                .position(|&b| b == b'\n')
+                .unwrap_or(trimmed_rest.len());
             let ypart_line = String::from_utf8_lossy(&trimmed_rest[..part_nl]);
             Self::parse_ypart(&ypart_line, &mut part_offset, &mut part_size);
             rest = if part_nl < trimmed_rest.len() {
@@ -136,10 +148,20 @@ impl YencDecoder {
     }
 
     fn parse_ybegin(line: &str, header: &mut YencHeader) {
-        for token in line.split_whitespace() {
+        // `name=` is always the final field in yEnc =ybegin and may contain spaces.
+        let (head, name_part) = if let Some(idx) = line.find(" name=") {
+            (&line[..idx], Some(line[idx + 6..].trim()))
+        } else {
+            (line, None)
+        };
+
+        if let Some(name) = name_part {
+            header.name = name.to_string();
+        }
+
+        for token in head.split_whitespace() {
             if let Some((k, v)) = token.split_once('=') {
                 match k {
-                    "name" => header.name = v.to_string(),
                     "line" => header.line = v.parse().unwrap_or(128),
                     "size" => header.size = v.parse().unwrap_or(0),
                     "part" => header.part = v.parse().ok(),
@@ -168,14 +190,61 @@ impl YencDecoder {
     }
 
     fn extract_crc(trailer: &str) -> Option<u32> {
+        let mut full_crc = None;
         for token in trailer.split_whitespace() {
             if let Some((k, v)) = token.split_once('=') {
-                if k == "crc32" || k == "pcrc32" {
+                // Prefer part crc32 (`pcrc32`) when present on multi-part articles
+                if k == "pcrc32" {
                     return u32::from_str_radix(v.trim(), 16).ok();
+                }
+                if k == "crc32" {
+                    full_crc = u32::from_str_radix(v.trim(), 16).ok();
                 }
             }
         }
-        None
+        full_crc
+    }
+}
+
+/// Writes decoded yEnc parts at their byte offsets into target files.
+pub struct FileAssembler;
+
+impl FileAssembler {
+    /// Sanitizes an untrusted yEnc filename to prevent path traversal.
+    pub fn safe_filename(raw_name: &str, fallback: &str) -> String {
+        let base = Path::new(raw_name)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .trim();
+        if base.is_empty() || base == "." || base == ".." {
+            fallback.to_string()
+        } else {
+            base.to_string()
+        }
+    }
+
+    /// Writes a decoded article segment into `target_dir/<filename>` at `part_offset`.
+    pub async fn write_article(
+        target_dir: &Path,
+        fallback_name: &str,
+        article: &DecodedArticle,
+    ) -> Result<PathBuf, DecodeError> {
+        tokio::fs::create_dir_all(target_dir).await?;
+        let filename = Self::safe_filename(&article.header.name, fallback_name);
+        let file_path = target_dir.join(filename);
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&file_path)
+            .await?;
+
+        file.seek(SeekFrom::Start(article.part_offset as u64)).await?;
+        file.write_all(&article.data).await?;
+        file.flush().await?;
+
+        Ok(file_path)
     }
 }
 
@@ -183,22 +252,80 @@ impl YencDecoder {
 mod tests {
     use super::*;
 
+    fn yenc_encode(data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(data.len());
+        for &b in data {
+            let shifted = b.wrapping_add(42);
+            if matches!(shifted, 0 | b'\n' | b'\r' | b'=') {
+                out.push(b'=');
+                out.push(shifted.wrapping_add(64));
+            } else {
+                out.push(shifted);
+            }
+        }
+        out
+    }
+
     #[test]
     fn test_yenc_decode_single_part() {
         let text = b"Hello World!";
-        let mut encoded = Vec::new();
-        for &b in text {
-            encoded.push(b.wrapping_add(42));
-        }
+        let encoded = yenc_encode(text);
+
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(text);
+        let crc = hasher.finalize();
 
         let mut raw = Vec::new();
-        raw.extend_from_slice(b"=ybegin line=128 size=12 name=test.txt\r\n");
+        raw.extend_from_slice(b"=ybegin line=128 size=12 name=test file.txt\r\n");
         raw.extend_from_slice(&encoded);
-        raw.extend_from_slice(b"\r\n=yend size=12\r\n");
+        raw.extend_from_slice(format!("\r\n=yend size=12 crc32={crc:08x}\r\n").as_bytes());
 
         let res = YencDecoder::decode(&raw).unwrap();
-        assert_eq!(res.header.name, "test.txt");
+        assert_eq!(res.header.name, "test file.txt");
         assert_eq!(res.header.size, 12);
-        assert_eq!(res.data, b"Hello World!");
+        assert_eq!(res.data, text);
+    }
+
+    #[tokio::test]
+    async fn test_multipart_decode_and_out_of_order_assembly() {
+        let dir = tempfile::tempdir().unwrap();
+        let part1 = b"Hello ";
+        let part2 = b"RustNZBD!\n";
+
+        let mut h1 = crc32fast::Hasher::new();
+        h1.update(part1);
+        let crc1 = h1.finalize();
+
+        let mut h2 = crc32fast::Hasher::new();
+        h2.update(part2);
+        let crc2 = h2.finalize();
+
+        let mut raw1 = Vec::new();
+        raw1.extend_from_slice(b"=ybegin part=1 total=2 line=128 size=16 name=../../evil/out.bin\r\n");
+        raw1.extend_from_slice(b"=ypart begin=1 end=6\r\n");
+        raw1.extend_from_slice(&yenc_encode(part1));
+        raw1.extend_from_slice(format!("\r\n=yend size=6 part=1 pcrc32={crc1:08x}\r\n").as_bytes());
+
+        let mut raw2 = Vec::new();
+        raw2.extend_from_slice(b"=ybegin part=2 total=2 line=128 size=16 name=../../evil/out.bin\r\n");
+        raw2.extend_from_slice(b"=ypart begin=7 end=16\r\n");
+        raw2.extend_from_slice(&yenc_encode(part2));
+        raw2.extend_from_slice(format!("\r\n=yend size=10 part=2 pcrc32={crc2:08x}\r\n").as_bytes());
+
+        let dec1 = YencDecoder::decode(&raw1).unwrap();
+        let dec2 = YencDecoder::decode(&raw2).unwrap();
+
+        // Write part 2 before part 1
+        let path2 = FileAssembler::write_article(dir.path(), "fallback.bin", &dec2)
+            .await
+            .unwrap();
+        let path1 = FileAssembler::write_article(dir.path(), "fallback.bin", &dec1)
+            .await
+            .unwrap();
+
+        assert_eq!(path1, dir.path().join("out.bin"));
+        assert_eq!(path1, path2);
+        let assembled = tokio::fs::read(&path1).await.unwrap();
+        assert_eq!(assembled, b"Hello RustNZBD!\n");
     }
 }

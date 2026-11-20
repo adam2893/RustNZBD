@@ -1,12 +1,13 @@
+use chrono::Utc;
+use parking_lot::RwLock;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
-use sabnzbd_core::{JobStatus, QueueItem};
+use sabnzbd_core::{HistoryItem, JobStatus, QueueItem};
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use thiserror::Error;
 use uuid::Uuid;
-use chrono::Utc;
 
 #[derive(Error, Debug)]
 pub enum NzbError {
@@ -122,8 +123,16 @@ impl NzbDocument {
     }
 }
 
+#[derive(Debug, Clone)]
+struct QueuedEntry {
+    item: QueueItem,
+    document: Option<NzbDocument>,
+}
+
 pub struct DownloadQueue {
-    items: Arc<RwLock<VecDeque<QueueItem>>>,
+    items: Arc<RwLock<VecDeque<QueuedEntry>>>,
+    history: Arc<RwLock<Vec<HistoryItem>>>,
+    paused: Arc<RwLock<bool>>,
 }
 
 impl Default for DownloadQueue {
@@ -136,16 +145,33 @@ impl DownloadQueue {
     pub fn new() -> Self {
         Self {
             items: Arc::new(RwLock::new(VecDeque::new())),
+            history: Arc::new(RwLock::new(Vec::new())),
+            paused: Arc::new(RwLock::new(false)),
         }
     }
 
     pub fn add_nzb(&self, filename: String, total_bytes: u64, category: String) -> QueueItem {
+        self.add_nzb_with_doc(filename, total_bytes, category, None)
+    }
+
+    pub fn add_nzb_with_doc(
+        &self,
+        filename: String,
+        total_bytes: u64,
+        category: String,
+        document: Option<NzbDocument>,
+    ) -> QueueItem {
+        let status = if *self.paused.read() {
+            JobStatus::Paused
+        } else {
+            JobStatus::Queued
+        };
         let item = QueueItem {
-            id: format!("SABnzbd_nzo_{}", &Uuid::new_v4().to_string().replace("-", "")[..10]),
+            id: format!("SABnzbd_nzo_{}", &Uuid::new_v4().to_string().replace('-', "")[..10]),
             filename,
             total_bytes,
             downloaded_bytes: 0,
-            status: JobStatus::Queued,
+            status,
             priority: 0,
             category,
             eta_seconds: None,
@@ -153,31 +179,117 @@ impl DownloadQueue {
             time_added: Utc::now(),
         };
 
-        self.items.write().push_back(item.clone());
+        self.items.write().push_back(QueuedEntry {
+            item: item.clone(),
+            document,
+        });
         item
     }
 
     pub fn list(&self) -> Vec<QueueItem> {
-        self.items.read().iter().cloned().collect()
+        self.items.read().iter().map(|e| e.item.clone()).collect()
+    }
+
+    pub fn history(&self) -> Vec<HistoryItem> {
+        self.history.read().clone()
+    }
+
+    pub fn is_paused(&self) -> bool {
+        *self.paused.read()
     }
 
     pub fn pause(&self) {
-        for item in self.items.write().iter_mut() {
-            if item.status == JobStatus::Downloading || item.status == JobStatus::Queued {
-                item.status = JobStatus::Paused;
+        *self.paused.write() = true;
+        for entry in self.items.write().iter_mut() {
+            if entry.item.status == JobStatus::Downloading || entry.item.status == JobStatus::Queued {
+                entry.item.status = JobStatus::Paused;
             }
         }
     }
 
     pub fn resume(&self) {
-        for item in self.items.write().iter_mut() {
-            if item.status == JobStatus::Paused {
-                item.status = JobStatus::Queued;
+        *self.paused.write() = false;
+        for entry in self.items.write().iter_mut() {
+            if entry.item.status == JobStatus::Paused {
+                entry.item.status = JobStatus::Queued;
             }
         }
     }
-}
 
+    pub fn delete_queue_item(&self, id: &str) -> bool {
+        let mut items = self.items.write();
+        let before = items.len();
+        items.retain(|e| e.item.id != id);
+        items.len() < before
+    }
+
+    pub fn delete_history_item(&self, id: &str) -> bool {
+        let mut hist = self.history.write();
+        let before = hist.len();
+        hist.retain(|h| h.id != id);
+        hist.len() < before
+    }
+
+    /// Claims the next queued job with an attached NzbDocument and marks it Downloading.
+    pub fn claim_next_job(&self) -> Option<(QueueItem, NzbDocument)> {
+        if *self.paused.read() {
+            return None;
+        }
+        let mut items = self.items.write();
+        for entry in items.iter_mut() {
+            if entry.item.status == JobStatus::Queued && entry.document.is_some() {
+                entry.item.status = JobStatus::Downloading;
+                return Some((entry.item.clone(), entry.document.clone().unwrap()));
+            }
+        }
+        None
+    }
+
+    pub fn add_downloaded_bytes(&self, id: &str, bytes: u64, speed_bps: u64) {
+        for entry in self.items.write().iter_mut() {
+            if entry.item.id == id {
+                entry.item.downloaded_bytes = entry.item.downloaded_bytes.saturating_add(bytes);
+                entry.item.speed_bps = speed_bps;
+                break;
+            }
+        }
+    }
+
+    pub fn set_status(&self, id: &str, status: JobStatus) {
+        for entry in self.items.write().iter_mut() {
+            if entry.item.id == id {
+                entry.item.status = status;
+                break;
+            }
+        }
+    }
+
+    /// Moves a job from the active queue into history.
+    pub fn finish_job(&self, id: &str, storage_path: PathBuf, failure_reason: Option<String>) {
+        let mut items = self.items.write();
+        if let Some(pos) = items.iter().position(|e| e.item.id == id) {
+            let entry = items.remove(pos).unwrap();
+            let status = if failure_reason.is_some() {
+                "Failed".to_string()
+            } else {
+                "Completed".to_string()
+            };
+            self.history.write().insert(
+                0,
+                HistoryItem {
+                    id: entry.item.id,
+                    name: entry.item.filename,
+                    size: entry.item.total_bytes.max(entry.item.downloaded_bytes),
+                    category: entry.item.category,
+                    status,
+                    completed_time: Utc::now(),
+                    storage_path,
+                    failure_reason,
+                },
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -205,5 +317,28 @@ mod tests {
         assert_eq!(doc.files[0].groups, vec!["alt.binaries.test"]);
         assert_eq!(doc.files[0].segments.len(), 2);
         assert_eq!(doc.total_bytes(), 1_000_000);
+    }
+
+    #[test]
+    fn test_queue_lifecycle() {
+        let q = DownloadQueue::new();
+        let doc = NzbDocument { files: vec![] };
+        let item = q.add_nzb_with_doc("test.nzb".to_string(), 1024, "tv".to_string(), Some(doc));
+        assert_eq!(q.list().len(), 1);
+
+        q.pause();
+        assert!(q.claim_next_job().is_none());
+        q.resume();
+
+        let (claimed, _) = q.claim_next_job().expect("Should claim queued job");
+        assert_eq!(claimed.id, item.id);
+
+        q.add_downloaded_bytes(&item.id, 512, 1000);
+        assert_eq!(q.list()[0].downloaded_bytes, 512);
+
+        q.finish_job(&item.id, PathBuf::from("/tmp/done"), None);
+        assert!(q.list().is_empty());
+        assert_eq!(q.history().len(), 1);
+        assert_eq!(q.history()[0].status, "Completed");
     }
 }
