@@ -45,7 +45,7 @@ fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("rustnzbd_state.json"));
 
-    let loaded_cfg = Config::load_or_create(&config_path)?;
+    let loaded_cfg = Config::load_or_import(&config_path)?;
     let queue = Arc::new(DownloadQueue::new_persistent(state_path));
     let shutdown_notify = Arc::new(Notify::new());
 

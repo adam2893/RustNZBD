@@ -285,6 +285,25 @@ impl Config {
             .unwrap_or("default");
         self.complete_dir.join(safe_cat)
     }
+    /// Loads TOML config from `path`; if missing, auto-imports sibling `sabnzbd.ini` when present, otherwise creates default.
+    pub fn load_or_import(path: &Path) -> Result<Self, ConfigError> {
+        if path.exists() {
+            let content = std::fs::read_to_string(path)?;
+            let cfg: Self = toml::from_str(&content)?;
+            return Ok(cfg);
+        }
+        let ini_path = path.with_file_name("sabnzbd.ini");
+        if ini_path.exists() {
+            let ini_content = std::fs::read_to_string(&ini_path)?;
+            let cfg = Self::import_sabnzbd_ini(&ini_content);
+            cfg.save(path)?;
+            return Ok(cfg);
+        }
+        let cfg = Self::default();
+        cfg.save(path)?;
+        Ok(cfg)
+    }
+
     /// Loads TOML config from `path`, or writes and returns a default config if missing.
     pub fn load_or_create(path: &Path) -> Result<Self, ConfigError> {
         if path.exists() {
@@ -310,11 +329,12 @@ impl Config {
         Ok(())
     }
 
-    /// Imports core settings and `[[server]]` sections from a legacy `sabnzbd.ini` string.
+    /// Imports core settings, `[[server]]`, and `[[category]]` sections from a legacy `sabnzbd.ini` string.
     pub fn import_sabnzbd_ini(ini: &str) -> Self {
         let mut cfg = Self::default();
         let mut section = String::new();
         let mut current_server: Option<ServerConfig> = None;
+        let mut current_cat: Option<(String, Option<PathBuf>)> = None;
 
         for raw_line in ini.lines() {
             let line = raw_line.trim();
@@ -325,17 +345,27 @@ impl Config {
                 if let Some(srv) = current_server.take() {
                     cfg.servers.push(srv);
                 }
+                if let Some((cat_name, Some(dir))) = current_cat.take() {
+                    cfg.categories.insert(cat_name, dir);
+                }
                 let name = line[2..line.len() - 2].trim().to_string();
-                current_server = Some(ServerConfig {
-                    name,
-                    enable: true,
-                    ..Default::default()
-                });
+                if section == "categories" {
+                    current_cat = Some((name, None));
+                } else {
+                    current_server = Some(ServerConfig {
+                        name,
+                        enable: true,
+                        ..Default::default()
+                    });
+                }
                 continue;
             }
             if line.starts_with('[') && line.ends_with(']') {
                 if let Some(srv) = current_server.take() {
                     cfg.servers.push(srv);
+                }
+                if let Some((cat_name, Some(dir))) = current_cat.take() {
+                    cfg.categories.insert(cat_name, dir);
                 }
                 section = line[1..line.len() - 1].trim().to_string();
                 continue;
@@ -361,6 +391,15 @@ impl Config {
                     "optional" => srv.optional = val == "1" || val.eq_ignore_ascii_case("true"),
                     _ => {}
                 }
+            } else if let Some((_, dir_slot)) = current_cat.as_mut() {
+                if key == "dir" && !val.is_empty() {
+                    let p = PathBuf::from(val);
+                    *dir_slot = Some(if p.is_absolute() {
+                        p
+                    } else {
+                        cfg.complete_dir.join(p)
+                    });
+                }
             } else if section == "misc" {
                 match key {
                     "api_key" if !val.is_empty() => cfg.api_key = val.to_string(),
@@ -378,6 +417,9 @@ impl Config {
 
         if let Some(srv) = current_server.take() {
             cfg.servers.push(srv);
+        }
+        if let Some((cat_name, Some(dir))) = current_cat.take() {
+            cfg.categories.insert(cat_name, dir);
         }
         cfg
     }
@@ -619,6 +661,9 @@ api_key = deadbeef1234
 port = 9090
 download_dir = /data/incomplete
 complete_dir = /data/complete
+[categories]
+[[sonarr]]
+dir = /downloads/sonarr
 [servers]
 [[news.provider.com]]
 host = news.provider.com
@@ -637,6 +682,19 @@ enable = 1
         assert_eq!(cfg.servers[0].host, "news.provider.com");
         assert_eq!(cfg.servers[0].connections, 16);
         assert!(cfg.servers[0].ssl);
+        assert_eq!(cfg.categories.get("sonarr"), Some(&PathBuf::from("/downloads/sonarr")));
+    }
+
+    #[test]
+    fn test_load_or_import_auto_detects_sabnzbd_ini() {
+        let dir = tempfile::tempdir().unwrap();
+        let ini_path = dir.path().join("sabnzbd.ini");
+        let toml_path = dir.path().join("rustnzbd.toml");
+        std::fs::write(&ini_path, "[misc]\napi_key = myexistingkey\nport = 8080\n").unwrap();
+
+        let cfg = Config::load_or_import(&toml_path).unwrap();
+        assert_eq!(cfg.api_key, "myexistingkey");
+        assert!(toml_path.exists());
     }
 
     #[test]
