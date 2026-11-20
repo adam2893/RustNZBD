@@ -1,7 +1,9 @@
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -337,6 +339,46 @@ pub struct HistoryItem {
     pub completed_time: DateTime<Utc>,
     pub storage_path: PathBuf,
     pub failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ServerStats {
+    pub bytes_downloaded: u64,
+    pub articles_ok: u64,
+    pub articles_failed: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct StatsTracker {
+    servers: DashMap<String, ServerStats>,
+}
+
+impl StatsTracker {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn record_success(&self, server_name: &str, bytes: u64) {
+        let mut entry = self.servers.entry(server_name.to_string()).or_default();
+        entry.bytes_downloaded = entry.bytes_downloaded.saturating_add(bytes);
+        entry.articles_ok = entry.articles_ok.saturating_add(1);
+    }
+
+    pub fn record_failure(&self, server_name: &str) {
+        let mut entry = self.servers.entry(server_name.to_string()).or_default();
+        entry.articles_failed = entry.articles_failed.saturating_add(1);
+    }
+
+    pub fn snapshot(&self) -> HashMap<String, ServerStats> {
+        self.servers
+            .iter()
+            .map(|r| (r.key().clone(), r.value().clone()))
+            .collect()
+    }
+
+    pub fn total_bytes(&self) -> u64 {
+        self.servers.iter().map(|r| r.value().bytes_downloaded).sum()
+    }
 }
 
 #[cfg(test)]

@@ -1,20 +1,22 @@
 use axum::{
     body::Bytes,
     extract::{Query, State},
+    http::header,
     response::{Html, IntoResponse, Json, Response},
     routing::get,
     Router,
 };
 use flate2::read::GzDecoder;
 use parking_lot::RwLock;
-use sabnzbd_core::{Config, JobStatus, ServerConfig};
+use sabnzbd_core::{Config, JobStatus, ServerConfig, StatsTracker};
 use sabnzbd_nzb::{DownloadQueue, NzbDocument};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Notify;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
@@ -25,7 +27,9 @@ pub const SABNZBD_VERSION: &str = "4.4.1";
 pub struct AppState {
     pub config: Arc<RwLock<Config>>,
     pub queue: Arc<DownloadQueue>,
+    pub stats: Arc<StatsTracker>,
     pub config_path: Option<PathBuf>,
+    pub shutdown: Option<Arc<Notify>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,36 +89,54 @@ async fn handle_api(
     query: ApiQuery,
     body: Option<Bytes>,
 ) -> Response {
+    let want_xml = query.output.as_deref() == Some("xml");
+    let val = handle_api_json(state, query, body).await;
+    if want_xml {
+        let xml = format!("<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<sabnzbd>{}</sabnzbd>", json_to_xml(&val));
+        ([(header::CONTENT_TYPE, "application/xml; charset=utf-8")], xml).into_response()
+    } else {
+        Json(val).into_response()
+    }
+}
+
+async fn handle_api_json(
+    state: AppState,
+    query: ApiQuery,
+    body: Option<Bytes>,
+) -> Value {
     let mode = query.mode.as_deref().unwrap_or("queue");
 
-    if let Some(err_resp) = check_auth(&state, mode, &query.apikey) {
-        return err_resp;
+    if check_auth(&state, mode, &query.apikey).is_some() {
+        return match query.apikey {
+            Some(_) => json!({"status": false, "error": "API Key Incorrect"}),
+            None => json!({"status": false, "error": "API Key Required"}),
+        };
     }
 
     let current_api_key = state.config.read().api_key.clone();
 
     match mode {
-        "version" => Json(json!({ "version": SABNZBD_VERSION })).into_response(),
+        "version" => json!({ "version": SABNZBD_VERSION }),
 
         "queue" => {
             if let Some(id) = query.value.as_deref() {
                 match query.name.as_deref() {
                     Some("delete") => {
                         let deleted = state.queue.delete_queue_item(id);
-                        return Json(json!({ "status": deleted, "nzo_ids": [id] })).into_response();
+                        return json!({ "status": deleted, "nzo_ids": [id] });
                     }
                     Some("pause") => {
                         let ok = state.queue.pause_item(id);
-                        return Json(json!({ "status": ok, "nzo_ids": [id] })).into_response();
+                        return json!({ "status": ok, "nzo_ids": [id] });
                     }
                     Some("resume") => {
                         let ok = state.queue.resume_item(id);
-                        return Json(json!({ "status": ok, "nzo_ids": [id] })).into_response();
+                        return json!({ "status": ok, "nzo_ids": [id] });
                     }
                     Some("priority") => {
                         let prio = query.priority.unwrap_or(0);
                         let ok = state.queue.set_priority(id, prio);
-                        return Json(json!({ "status": ok, "position": prio })).into_response();
+                        return json!({ "status": ok, "position": prio });
                     }
                     _ => {}
                 }
@@ -159,7 +181,7 @@ async fn handle_api(
                 .map(|bps| (bps / 1024).to_string())
                 .unwrap_or_default();
 
-            Json(json!({
+            json!({
                 "queue": {
                     "version": SABNZBD_VERSION,
                     "paused": paused,
@@ -174,14 +196,14 @@ async fn handle_api(
                     "slots": slots,
                     "status": queue_status
                 }
-            })).into_response()
+            })
         }
 
         "history" => {
             if query.name.as_deref() == Some("delete") {
                 if let Some(id) = query.value.as_deref() {
                     let deleted = state.queue.delete_history_item(id);
-                    return Json(json!({ "status": deleted, "nzo_ids": [id] })).into_response();
+                    return json!({ "status": deleted, "nzo_ids": [id] });
                 }
             }
 
@@ -204,7 +226,7 @@ async fn handle_api(
                 })
                 .collect();
 
-            Json(json!({
+            json!({
                 "history": {
                     "total_size": format!("{:.1} MB", total_size as f64 / 1_048_576.0),
                     "month_size": "0 B",
@@ -212,29 +234,63 @@ async fn handle_api(
                     "day_size": "0 B",
                     "slots": slots
                 }
-            })).into_response()
+            })
+        }
+
+        "get_files" => {
+            let Some(id) = query.value.as_deref() else {
+                return json!({ "status": false, "error": "Missing value (nzo_id)" });
+            };
+            let Some(files) = state.queue.get_files(id) else {
+                return json!({ "files": [] });
+            };
+            let list: Vec<_> = files
+                .into_iter()
+                .enumerate()
+                .map(|(idx, f)| {
+                    let bytes: u64 = f.segments.iter().map(|s| s.bytes).sum();
+                    json!({
+                        "nzf_id": format!("{id}_{idx}"),
+                        "filename": f.subject,
+                        "bytes": bytes,
+                        "segments": f.segments.len(),
+                        "status": "active",
+                    })
+                })
+                .collect();
+            json!({ "files": list })
         }
 
         "pause" => {
             state.queue.pause();
             info!("Queue paused via API");
-            Json(json!({ "status": true })).into_response()
+            json!({ "status": true })
         }
 
         "resume" => {
             state.queue.resume();
             info!("Queue resumed via API");
-            Json(json!({ "status": true })).into_response()
+            json!({ "status": true })
+        }
+
+        "shutdown" => {
+            info!("Shutdown requested via API");
+            if let Some(notify) = &state.shutdown {
+                notify.notify_one();
+            }
+            json!({ "status": true })
         }
 
         "server_stats" => {
-            Json(json!({
-                "servers": {},
-                "total": 0,
-                "month": 0,
-                "week": 0,
-                "day": 0
-            })).into_response()
+            let servers = state.stats.snapshot();
+            let total = state.stats.total_bytes();
+            json!({
+                "servers": servers,
+                "total": total,
+                "month": total,
+                "week": total,
+                "day": total
+            })
         }
 
         "get_cats" => {
@@ -245,30 +301,30 @@ async fn handle_api(
                 }
             }
             cats.sort();
-            Json(json!({ "categories": cats })).into_response()
+            json!({ "categories": cats })
         }
 
-        "warnings" => Json(json!({ "warnings": [] })).into_response(),
+        "warnings" => json!({ "warnings": [] }),
 
         "change_cat" => {
             if let (Some(id), Some(cat)) = (query.value.as_deref(), query.name.clone()) {
                 let ok = state.queue.set_category(id, cat);
-                return Json(json!({ "status": ok })).into_response();
+                return json!({ "status": ok });
             }
-            Json(json!({ "status": false, "error": "Missing value or name" })).into_response()
+            json!({ "status": false, "error": "Missing value or name" })
         }
 
-        "auth" => Json(json!({ "auth": "apikey" })).into_response(),
+        "auth" => json!({ "auth": "apikey" }),
 
         "fullstatus" => {
-            Json(json!({
+            json!({
                 "status": {
                     "version": SABNZBD_VERSION,
                     "config": {
                         "api_key": current_api_key,
                     }
                 }
-            })).into_response()
+            })
         }
 
         "config" => {
@@ -279,7 +335,7 @@ async fn handle_api(
                 } else if let Ok(kbps) = raw_val.trim_end_matches(['K', 'k']).parse::<usize>() {
                     Some(kbps.saturating_mul(1024))
                 } else {
-                    return Json(json!({ "status": false, "error": "Invalid speedlimit" })).into_response();
+                    return json!({ "status": false, "error": "Invalid speedlimit" });
                 };
                 {
                     let mut cfg = state.config.write();
@@ -290,9 +346,9 @@ async fn handle_api(
                         }
                     }
                 }
-                return Json(json!({ "status": true })).into_response();
+                return json!({ "status": true });
             }
-            Json(json!({ "status": false, "error": "Unsupported config operation" })).into_response()
+            json!({ "status": false, "error": "Unsupported config operation" })
         }
 
         "get_config" => {
@@ -302,17 +358,17 @@ async fn handle_api(
                     s.password = Some("********".to_string());
                 }
             }
-            Json(json!({ "config": cfg })).into_response()
+            json!({ "config": cfg })
         }
 
         "add_server" => {
             let Some(raw_body) = body else {
-                return Json(json!({ "status": false, "error": "Missing server JSON" })).into_response();
+                return json!({ "status": false, "error": "Missing server JSON" });
             };
             let server: ServerConfig = match serde_json::from_slice(&raw_body) {
                 Ok(s) => s,
                 Err(e) => {
-                    return Json(json!({ "status": false, "error": format!("Invalid server JSON: {}", e) })).into_response();
+                    return json!({ "status": false, "error": format!("Invalid server JSON: {}", e) });
                 }
             };
             {
@@ -324,13 +380,44 @@ async fn handle_api(
                     }
                 }
             }
-            Json(json!({ "status": true })).into_response()
+            json!({ "status": true })
+        }
+
+        "addlocalfile" => {
+            let Some(path_str) = query.name.as_deref() else {
+                return json!({ "status": false, "error": "Missing file path" });
+            };
+            let path = PathBuf::from(path_str);
+            let raw = match tokio::fs::read(&path).await {
+                Ok(b) => b,
+                Err(e) => {
+                    return json!({ "status": false, "error": format!("Failed reading file: {}", e) });
+                }
+            };
+            let xml_str = extract_nzb_xml(&raw);
+            let fallback_name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("local.nzb")
+                .to_string();
+            let cat = query.cat.unwrap_or_else(|| "default".to_string());
+            match NzbDocument::parse(&xml_str) {
+                Ok(doc) => {
+                    let total_bytes = doc.total_bytes();
+                    let reject_dups = state.config.read().detect_duplicates;
+                    match state.queue.add_nzb_checked(fallback_name, total_bytes, cat, Some(doc), reject_dups) {
+                        Ok(item) => json!({ "status": true, "nzo_ids": [item.id] }),
+                        Err(e) => json!({ "status": false, "error": e.to_string() }),
+                    }
+                }
+                Err(e) => json!({ "status": false, "error": format!("Invalid NZB XML: {}", e) }),
+            }
         }
 
         "addurl" => {
             let url = query.name.unwrap_or_default();
             if url.is_empty() {
-                return Json(json!({ "status": false, "error": "Missing URL" })).into_response();
+                return json!({ "status": false, "error": "Missing URL" });
             }
             let cat = query.cat.unwrap_or_else(|| "default".to_string());
             let fallback_name = query
@@ -351,28 +438,28 @@ async fn handle_api(
             {
                 Ok(c) => c,
                 Err(e) => {
-                    return Json(json!({ "status": false, "error": format!("HTTP client error: {}", e) })).into_response();
+                    return json!({ "status": false, "error": format!("HTTP client error: {}", e) });
                 }
             };
 
             let resp = match client.get(&url).send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    return Json(json!({ "status": false, "error": format!("Fetch failed: {}", e) })).into_response();
+                    return json!({ "status": false, "error": format!("Fetch failed: {}", e) });
                 }
             };
 
             if !resp.status().is_success() {
-                return Json(json!({
+                return json!({
                     "status": false,
                     "error": format!("Upstream returned HTTP {}", resp.status())
-                })).into_response();
+                });
             }
 
             let raw_bytes = match resp.bytes().await {
                 Ok(b) => b,
                 Err(e) => {
-                    return Json(json!({ "status": false, "error": format!("Read body failed: {}", e) })).into_response();
+                    return json!({ "status": false, "error": format!("Read body failed: {}", e) });
                 }
             };
 
@@ -382,26 +469,26 @@ async fn handle_api(
                     let total_bytes = doc.total_bytes();
                     let reject_dups = state.config.read().detect_duplicates;
                     match state.queue.add_nzb_checked(fallback_name, total_bytes, cat, Some(doc), reject_dups) {
-                        Ok(item) => Json(json!({
+                        Ok(item) => json!({
                             "status": true,
                             "nzo_ids": [item.id]
-                        })).into_response(),
-                        Err(e) => Json(json!({
+                        }),
+                        Err(e) => json!({
                             "status": false,
                             "error": e.to_string()
-                        })).into_response(),
+                        }),
                     }
                 }
-                Err(e) => Json(json!({
+                Err(e) => json!({
                     "status": false,
                     "error": format!("Invalid NZB XML from URL: {}", e)
-                })).into_response(),
+                }),
             }
         }
 
         "addfile" => {
             let Some(raw_body) = body else {
-                return Json(json!({ "status": false, "error": "Missing NZB payload" })).into_response();
+                return json!({ "status": false, "error": "Missing NZB payload" });
             };
             let xml_str = extract_nzb_xml(&raw_body);
             match NzbDocument::parse(&xml_str) {
@@ -415,27 +502,53 @@ async fn handle_api(
                     info!("Add NZB file: {} ({} bytes)", name, total_bytes);
                     let reject_dups = state.config.read().detect_duplicates;
                     match state.queue.add_nzb_checked(name, total_bytes, cat, Some(doc), reject_dups) {
-                        Ok(item) => Json(json!({
+                        Ok(item) => json!({
                             "status": true,
                             "nzo_ids": [item.id]
-                        })).into_response(),
-                        Err(e) => Json(json!({
+                        }),
+                        Err(e) => json!({
                             "status": false,
                             "error": e.to_string()
-                        })).into_response(),
+                        }),
                     }
                 }
-                Err(e) => Json(json!({
+                Err(e) => json!({
                     "status": false,
                     "error": format!("Invalid NZB XML: {}", e)
-                })).into_response(),
+                }),
             }
         }
 
-        _ => Json(json!({
+        _ => json!({
             "status": false,
             "error": format!("Unknown mode: {}", mode)
-        })).into_response(),
+        }),
+    }
+}
+
+fn json_to_xml(val: &Value) -> String {
+    match val {
+        Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| match v {
+                Value::Array(arr) => arr
+                    .iter()
+                    .map(|item| format!("<{k}>{}</{k}>", json_to_xml(item)))
+                    .collect::<String>(),
+                _ => format!("<{k}>{}</{k}>", json_to_xml(v)),
+            })
+            .collect(),
+        Value::Array(arr) => arr
+            .iter()
+            .map(|item| format!("<item>{}</item>", json_to_xml(item)))
+            .collect(),
+        Value::String(s) => s
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;"),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => String::new(),
     }
 }
 
@@ -478,7 +591,9 @@ mod tests {
         let state = AppState {
             config: Arc::new(RwLock::new(cfg)),
             queue: Arc::new(DownloadQueue::new()),
+            stats: StatsTracker::new(),
             config_path: cfg_path,
+            shutdown: None,
         };
         (state, key)
     }
@@ -648,5 +763,56 @@ mod tests {
         let q = json_body(resp).await;
         assert_eq!(q["queue"]["speedlimit"], "500");
         assert_eq!(q["queue"]["slots"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_api_get_files_stats_and_xml_output() {
+        let (state, key) = test_state(None);
+        state.stats.record_success("Primary", 4096);
+        let app = create_router(state);
+
+        let nzb = r#"<nzb><file poster="a" date="1" subject="movie.mkv"><groups><group>alt.test</group></groups><segments><segment bytes="1024" number="1">id1@test</segment></segments></file></nzb>"#;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api?mode=addfile&nzbname=xml.nzb&apikey={key}"))
+                    .body(Body::from(nzb))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let nzo_id = json_body(resp).await["nzo_ids"][0].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api?mode=get_files&value={nzo_id}&apikey={key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let files_json = json_body(resp).await;
+        assert_eq!(files_json["files"][0]["filename"], "movie.mkv");
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api?mode=server_stats&apikey={key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let stats_json = json_body(resp).await;
+        assert_eq!(stats_json["total"], 4096);
+
+        let resp = app
+            .oneshot(Request::get("/api?mode=version&output=xml").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let xml = String::from_utf8(body.to_vec()).unwrap();
+        assert!(xml.contains("<version>4.4.1</version>"));
     }
 }

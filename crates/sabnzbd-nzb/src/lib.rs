@@ -335,6 +335,14 @@ impl DownloadQueue {
         self.items.read().iter().map(|e| e.item.clone()).collect()
     }
 
+    pub fn get_files(&self, id: &str) -> Option<Vec<NzbFile>> {
+        self.items
+            .read()
+            .iter()
+            .find(|e| e.item.id == id)
+            .and_then(|e| e.document.as_ref().map(|d| d.files.clone()))
+    }
+
     pub fn history(&self) -> Vec<HistoryItem> {
         self.history.read().clone()
     }

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use parking_lot::RwLock;
 use sabnzbd_api::{create_router, extract_nzb_xml, AppState};
-use sabnzbd_core::{Config, JobStatus, QueueItem, ScheduleAction, ServerConfig};
+use sabnzbd_core::{Config, JobStatus, QueueItem, ScheduleAction, ServerConfig, StatsTracker};
 use sabnzbd_decode::{FileAssembler, YencDecoder};
 use sabnzbd_nntp::{NntpError, NntpPool};
 use sabnzbd_nzb::{DownloadQueue, NzbDocument};
@@ -10,8 +10,10 @@ use sabnzbd_services::{Notifier, RssPoller, Scheduler};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -30,6 +32,16 @@ async fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("rustnzbd.toml"));
 
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|a| a == "--import-ini") {
+        let ini_path = args.get(pos + 1).expect("Usage: rustnzbd --import-ini <sabnzbd.ini>");
+        let ini_text = std::fs::read_to_string(ini_path)?;
+        let imported = Config::import_sabnzbd_ini(&ini_text);
+        imported.save(&config_path)?;
+        info!("Imported {} into {:?}", ini_path, config_path);
+        return Ok(());
+    }
+
     let state_path = std::env::var("RUSTNZBD_STATE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("rustnzbd_state.json"));
@@ -41,16 +53,20 @@ async fn main() -> Result<()> {
 
     let config = Arc::new(RwLock::new(loaded_cfg));
     let queue = Arc::new(DownloadQueue::new_persistent(state_path));
+    let stats = StatsTracker::new();
+    let shutdown_notify = Arc::new(Notify::new());
 
     // Spawn background download, watched-folder, and scheduler/RSS workers
-    tokio::spawn(download_worker_loop(config.clone(), queue.clone()));
+    tokio::spawn(download_worker_loop(config.clone(), queue.clone(), stats.clone()));
     tokio::spawn(watch_dir_loop(config.clone(), queue.clone()));
     tokio::spawn(scheduler_and_rss_loop(config.clone(), queue.clone()));
 
     let state = AppState {
         config: config.clone(),
         queue: queue.clone(),
+        stats,
         config_path: Some(config_path.clone()),
+        shutdown: Some(shutdown_notify.clone()),
     };
 
     let app = create_router(state);
@@ -66,15 +82,18 @@ async fn main() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown_notify))
         .await?;
 
     info!("RustNZBD shut down cleanly");
     Ok(())
 }
 
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+async fn shutdown_signal(notify: Arc<Notify>) {
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = notify.notified() => {}
+    }
     info!("Shutdown signal received");
 }
 
@@ -182,11 +201,15 @@ async fn scheduler_and_rss_loop(config: Arc<RwLock<Config>>, queue: Arc<Download
     }
 }
 
-async fn download_worker_loop(config: Arc<RwLock<Config>>, queue: Arc<DownloadQueue>) {
+async fn download_worker_loop(
+    config: Arc<RwLock<Config>>,
+    queue: Arc<DownloadQueue>,
+    stats: Arc<StatsTracker>,
+) {
     loop {
         if let Some((job, doc)) = queue.claim_next_job() {
             let cfg_snapshot = config.read().clone();
-            if let Err(err) = process_job(&config, &cfg_snapshot, &queue, &job, doc).await {
+            if let Err(err) = process_job(&config, &cfg_snapshot, &queue, &stats, &job, doc).await {
                 error!("Job {} failed: {}", job.id, err);
                 let job_dir = cfg_snapshot.download_dir.join(&job.filename);
                 queue.finish_job(&job.id, job_dir, Some(err.clone()));
@@ -205,10 +228,16 @@ async fn download_worker_loop(config: Arc<RwLock<Config>>, queue: Arc<DownloadQu
     }
 }
 
+fn is_archive_subject(subject: &str) -> bool {
+    let lower = subject.to_ascii_lowercase();
+    lower.contains(".rar") || lower.contains(".zip") || lower.contains(".7z")
+}
+
 async fn process_job(
     live_config: &Arc<RwLock<Config>>,
     cfg: &Config,
     queue: &DownloadQueue,
+    stats: &StatsTracker,
     job: &QueueItem,
     doc: NzbDocument,
 ) -> std::result::Result<(), String> {
@@ -237,24 +266,42 @@ async fn process_job(
         .await
         .map_err(|e| e.to_string())?;
 
+    let mut passwords = Vec::new();
+    if let Some(p) = &job.password {
+        passwords.push(p.clone());
+    }
+    passwords.extend(cfg.passwords.iter().cloned());
+
+    let archive_seg_count: usize = doc
+        .files
+        .iter()
+        .filter(|f| is_archive_subject(&f.subject))
+        .map(|f| f.segments.len())
+        .sum();
+    let archive_remaining = Arc::new(AtomicUsize::new(archive_seg_count));
+    let mut direct_unpack_handle: Option<tokio::task::JoinHandle<bool>> = None;
+
     let mut tasks = JoinSet::new();
     let started = Instant::now();
+    let stats_arc = Arc::new(stats);
+    let _ = stats_arc;
 
     for (file_idx, file) in doc.files.into_iter().enumerate() {
         let fallback_name = format!("file_{file_idx}.bin");
+        let is_archive = is_archive_subject(&file.subject);
         for seg in file.segments {
             let pools = pools.clone();
             let dir = work_dir.clone();
             let fallback = fallback_name.clone();
 
             tasks.spawn(async move {
-                let raw = fetch_from_pools(&pools, &seg.message_id).await?;
+                let (server_name, raw) = fetch_from_pools(&pools, &seg.message_id).await?;
                 let decoded = YencDecoder::decode(&raw).map_err(|e| e.to_string())?;
                 let len = decoded.data.len() as u64;
                 FileAssembler::write_article(&dir, &fallback, &decoded)
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok::<u64, String>(len)
+                Ok::<(String, u64, bool), String>((server_name, len, is_archive))
             });
         }
     }
@@ -262,7 +309,8 @@ async fn process_job(
     let mut downloaded_total = 0u64;
     while let Some(res) = tasks.join_next().await {
         match res {
-            Ok(Ok(bytes)) => {
+            Ok(Ok((server_name, bytes, is_archive))) => {
+                stats.record_success(&server_name, bytes);
                 downloaded_total += bytes;
                 let elapsed = started.elapsed().as_secs_f64().max(0.001);
                 let speed_limit = live_config.read().speed_limit;
@@ -277,8 +325,23 @@ async fn process_job(
                 let actual_elapsed = started.elapsed().as_secs_f64().max(0.001);
                 let speed_bps = (downloaded_total as f64 / actual_elapsed) as u64;
                 queue.add_downloaded_bytes(&job.id, bytes, speed_bps);
+
+                // Trigger Direct Unpack as soon as all archive segments finish downloading
+                if is_archive && archive_remaining.fetch_sub(1, Ordering::SeqCst) == 1 && direct_unpack_handle.is_none() {
+                    let unpack_dir = work_dir.clone();
+                    let unpack_pw = passwords.clone();
+                    info!("Direct Unpack triggered for {}", job.id);
+                    direct_unpack_handle = Some(tokio::spawn(async move {
+                        unpack_dir_archives(&unpack_dir, &unpack_pw).await
+                    }));
+                }
             }
-            Ok(Err(e)) => warn!("Segment error in job {}: {}", job.id, e),
+            Ok(Err(e)) => {
+                if let Some(first_pool) = pools.first() {
+                    stats.record_failure(first_pool.server_name());
+                }
+                warn!("Segment error in job {}: {}", job.id, e);
+            }
             Err(e) => warn!("Worker panic in job {}: {}", job.id, e),
         }
     }
@@ -289,34 +352,11 @@ async fn process_job(
     }
 
     queue.set_status(&job.id, JobStatus::Extracting);
-    let mut passwords = Vec::new();
-    if let Some(p) = &job.password {
-        passwords.push(p.clone());
-    }
-    passwords.extend(cfg.passwords.iter().cloned());
-
-    let mut extracted_any = false;
-    if let Ok(mut entries) = tokio::fs::read_dir(&work_dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            let ext = path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            let should_extract = match ext.as_str() {
-                "rar" => PostProcessor::is_primary_rar_volume(&path),
-                "zip" | "7z" => true,
-                _ => false,
-            };
-            if should_extract {
-                match PostProcessor::extract_archive_with_passwords(&path, &work_dir, &passwords).await {
-                    Ok(()) => extracted_any = true,
-                    Err(e) => warn!("Archive extraction issue for {:?}: {}", path, e),
-                }
-            }
-        }
-    }
+    let extracted_any = if let Some(handle) = direct_unpack_handle {
+        handle.await.unwrap_or(false)
+    } else {
+        unpack_dir_archives(&work_dir, &passwords).await
+    };
 
     if cfg.cleanup_archives && extracted_any {
         if let Err(e) = PostProcessor::cleanup_processed_files(&work_dir).await {
@@ -358,11 +398,37 @@ async fn process_job(
     Ok(())
 }
 
-async fn fetch_from_pools(pools: &[Arc<NntpPool>], message_id: &str) -> std::result::Result<bytes::Bytes, String> {
+async fn unpack_dir_archives(work_dir: &Path, passwords: &[String]) -> bool {
+    let mut extracted_any = false;
+    if let Ok(mut entries) = tokio::fs::read_dir(work_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let should_extract = match ext.as_str() {
+                "rar" => PostProcessor::is_primary_rar_volume(&path),
+                "zip" | "7z" => true,
+                _ => false,
+            };
+            if should_extract {
+                match PostProcessor::extract_archive_with_passwords(&path, work_dir, passwords).await {
+                    Ok(()) => extracted_any = true,
+                    Err(e) => warn!("Archive extraction issue for {:?}: {}", path, e),
+                }
+            }
+        }
+    }
+    extracted_any
+}
+
+async fn fetch_from_pools(pools: &[Arc<NntpPool>], message_id: &str) -> std::result::Result<(String, bytes::Bytes), String> {
     let mut last_err = String::from("No NNTP pools available");
     for pool in pools {
         match pool.fetch_body(message_id).await {
-            Ok(bytes) => return Ok(bytes),
+            Ok(bytes) => return Ok((pool.server_name().to_string(), bytes)),
             Err(NntpError::ArticleNotFound(_)) => {
                 last_err = format!("Article {} not found", message_id);
                 continue;
@@ -485,11 +551,14 @@ mod tests {
         let api_key = cfg.api_key.clone();
         let shared_cfg = Arc::new(RwLock::new(cfg.clone()));
         let queue = Arc::new(DownloadQueue::new());
+        let stats = StatsTracker::new();
 
         let app = create_router(AppState {
             config: shared_cfg.clone(),
             queue: queue.clone(),
+            stats: stats.clone(),
             config_path: None,
+            shutdown: None,
         });
 
         let nzb = r#"<nzb>
@@ -513,7 +582,8 @@ mod tests {
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
 
         let (job, doc) = queue.claim_next_job().expect("Job should be queued");
-        process_job(&shared_cfg, &cfg, &queue, &job, doc).await.unwrap();
+        process_job(&shared_cfg, &cfg, &queue, &stats, &job, doc).await.unwrap();
+        assert_eq!(stats.total_bytes(), payload.len() as u64);
 
         assert!(queue.list().is_empty());
         let hist = queue.history();

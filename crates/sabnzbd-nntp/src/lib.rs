@@ -230,6 +230,10 @@ impl NntpPool {
         }
     }
 
+    pub fn server_name(&self) -> &str {
+        &self.config.name
+    }
+
     pub async fn fetch_body(&self, message_id: &str) -> Result<Bytes, NntpError> {
         let _permit = self
             .semaphore
